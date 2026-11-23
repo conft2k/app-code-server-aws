@@ -38,7 +38,7 @@
   <text x="1238" y="420" font-size="12" fill="#232F3E">10.42.0.0/24</text>
 
   <!-- EC2 instance contents -->
-  <rect x="480" y="292" width="446" height="218" fill="none" stroke="#ED7100" stroke-width="1.5"/>
+  <rect x="480" y="292" width="446" height="184" fill="none" stroke="#ED7100" stroke-width="1.5"/>
   <image href="data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPHN2ZyB3aWR0aD0iNDBweCIgaGVpZ2h0PSI0MHB4IiB2aWV3Qm94PSIwIDAgNDAgNDAiIHZlcnNpb249IjEuMSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB4bWxuczp4bGluaz0iaHR0cDovL3d3dy53My5vcmcvMTk5OS94bGluayI+CiAgICA8dGl0bGU+SWNvbi1BcmNoaXRlY3R1cmUtR3JvdXAvMzIvRUMyLWluc3RhbmNlLWNvbnRlbnRzXzMyPC90aXRsZT4KICAgIDxnIGlkPSJJY29uLUFyY2hpdGVjdHVyZS1Hcm91cC8zMi9FQzItaW5zdGFuY2UtY29udGVudHNfMzIiIHN0cm9rZT0ibm9uZSIgc3Ryb2tlLXdpZHRoPSIxIiBmaWxsPSJub25lIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiPgogICAgICAgIDxyZWN0IGlkPSJSZWN0YW5nbGUiIGZpbGw9IiNFRDcxMDAiIHg9IjAiIHk9IjAiIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCI+PC9yZWN0PgogICAgICAgIDxwYXRoIGQ9Ik0xMCwyOSBMMjksMjkgTDI5LDEwIEwxMCwxMCBMMTAsMjkgWiBNMzMsMTIgTDMzLDExIEwzMCwxMSBMMzAsOS41IEMzMCw5LjIyNCAyOS43NzYsOSAyOS41LDkgTDI4LDkgTDI4LDYgTDI3LDYgTDI3LDkgTDI0LDkgTDI0LDYgTDIzLDYgTDIzLDkgTDIwLDkgTDIwLDYgTDE5LDYgTDE5LDkgTDE2LDkgTDE2LDYgTDE1LDYgTDE1LDkgTDEyLDkgTDEyLDYgTDExLDYgTDExLDkgTDkuNSw5IEM5LjIyNCw5IDksOS4yMjQgOSw5LjUgTDksMTEgTDYsMTEgTDYsMTIgTDksMTIgTDksMTUgTDYsMTUgTDYsMTYgTDksMTYgTDksMTkgTDYsMTkgTDYsMjAgTDksMjAgTDksMjMgTDYsMjMgTDYsMjQgTDksMjQgTDksMjcgTDYsMjcgTDYsMjggTDksMjggTDksMjkuNSBDOSwyOS43NzYgOS4yMjQsMzAgOS41LDMwIEwxMSwzMCBMMTEsMzMgTDEyLDMzIEwxMiwzMCBMMTUsMzAgTDE1LDMzIEwxNiwzMyBMMTYsMzAgTDE5LDMwIEwxOSwzMyBMMjAsMzMgTDIwLDMwIEwyMywzMCBMMjMsMzMgTDI0LDMzIEwyNCwzMCBMMjcsMzAgTDI3LDMzIEwyOCwzMyBMMjgsMzAgTDI5LjUsMzAgQzI5Ljc3NiwzMCAzMCwyOS43NzYgMzAsMjkuNSBMMzAsMjggTDMzLDI4IEwzMywyNyBMMzAsMjcgTDMwLDI0IEwzMywyNCBMMzMsMjMgTDMwLDIzIEwzMCwyMCBMMzMsMjAgTDMzLDE5IEwzMCwxOSBMMzAsMTYgTDMzLDE2IEwzMywxNSBMMzAsMTUgTDMwLDEyIEwzMywxMiBaIiBpZD0iRmlsbC0xIiBmaWxsPSIjRkZGRkZGIj48L3BhdGg+CiAgICA8L2c+Cjwvc3ZnPg==" x="480" y="292" width="24" height="24"/>
   <text x="512" y="310" font-size="14" fill="#ED7100" font-weight="600">EC2 (t4g)</text>
 
@@ -51,11 +51,6 @@
   <text x="830" y="357" font-size="14" font-weight="600" text-anchor="middle" fill="#232F3E">code-server</text>
   <text x="830" y="375" font-size="12" text-anchor="middle" fill="#545B64">VS Code · 경로 /</text>
   <text x="830" y="393" font-size="12" text-anchor="middle" fill="#545B64">127.0.0.1:8080</text>
-
-  <rect x="750" y="425" width="160" height="70" rx="4" fill="#FFF7EF" stroke="#ED7100" stroke-width="1.5"/>
-  <text x="830" y="447" font-size="14" font-weight="600" text-anchor="middle" fill="#232F3E">remobi</text>
-  <text x="830" y="465" font-size="12" text-anchor="middle" fill="#545B64">폰 터미널 · 경로 /r/</text>
-  <text x="830" y="483" font-size="12" text-anchor="middle" fill="#545B64">127.0.0.1:7682</text>
 
   <!-- clients outside AWS -->
   <image href="data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPHN2ZyB3aWR0aD0iNDhweCIgaGVpZ2h0PSI0OHB4IiB2aWV3Qm94PSIwIDAgNDggNDgiIHZlcnNpb249IjEuMSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB4bWxuczp4bGluaz0iaHR0cDovL3d3dy53My5vcmcvMTk5OS94bGluayI+CiAgICA8dGl0bGU+SWNvbi1SZXNvdXJjZS9HZW5lcmFsLVJlc291cmNlL1Jlc19Vc2VyXzQ4X0xpZ2h0PC90aXRsZT4KICAgIDxnIGlkPSJJY29uLVJlc291cmNlL0dlbmVyYWwtUmVzb3VyY2UvUmVzX1VzZXJfNDgiIHN0cm9rZT0ibm9uZSIgc3Ryb2tlLXdpZHRoPSIxIiBmaWxsPSJub25lIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiPgogICAgICAgIDxwYXRoIGQ9Ik02LjAyNSw0NCBDNi41MjQsMzQuMDg1IDE0LjM5NSwyNi4xNzggMjQsMjYuMTc4IEMyNy4yNDgsMjYuMTc4IDMwLjQzLDI3LjA5MiAzMy4yMDUsMjguODIyIEMzOC4zNTQsMzIuMDMzIDQxLjY1MywzNy43ODMgNDEuOTc0LDQ0IEw2LjAyNSw0NCBaIE0xNC4xOTIsMTMuODc4IEMxNC4xOTIsOC40MzIgMTguNTkyLDQgMjQuMDAxLDQgQzI5LjQwOCw0IDMzLjgwNyw4LjQzMiAzMy44MDcsMTMuODc4IEMzMy44MDcsMTkuMzI1IDI5LjQwOCwyMy43NTcgMjQuMDAxLDIzLjc1NyBDMTguNTkyLDIzLjc1NyAxNC4xOTIsMTkuMzI1IDE0LjE5MiwxMy44NzggTDE0LjE5MiwxMy44NzggWiBNMzQuMjYzLDI3LjEyNSBDMzIuNTMsMjYuMDQ0IDMwLjY1LDI1LjI2IDI4LjY5OCwyNC43NzEgQzMyLjg3NywyMi45MzkgMzUuODA3LDE4Ljc0OSAzNS44MDcsMTMuODc4IEMzNS44MDcsNy4zMjkgMzAuNTEsMiAyNC4wMDEsMiBDMTcuNDg5LDIgMTIuMTkyLDcuMzI5IDEyLjE5MiwxMy44NzggQzEyLjE5MiwxOC43NTUgMTUuMTMsMjIuOTUgMTkuMzE3LDI0Ljc3OCBDMTAuNTQ1LDI2Ljk4MSA0LDM1LjIgNCw0NSBDNCw0NS41NTIgNC40NDcsNDYgNSw0NiBMNDMsNDYgQzQzLjU1Miw0NiA0NCw0NS41NTIgNDQsNDUgQzQ0LDM3LjcxOSA0MC4yNjksMzAuODcgMzQuMjYzLDI3LjEyNSBMMzQuMjYzLDI3LjEyNSBaIiBpZD0iRmlsbC0xIiBmaWxsPSIjMjQyRjNFIj48L3BhdGg+CiAgICA8L2c+Cjwvc3ZnPg==" x="32" y="346" width="48" height="48"/>
@@ -126,10 +121,9 @@
   <circle cx="405" cy="356" r="10" fill="#232F3E"/><text x="405" y="360" font-size="12" font-weight="700" text-anchor="middle" fill="#FFFFFF">2</text>
   <text x="405" y="390" font-size="12" text-anchor="middle" fill="#232F3E">VPC origin</text>
   <text x="405" y="406" font-size="12" text-anchor="middle" fill="#232F3E">HTTP :80</text>
-  <!-- 3 oauth2-proxy -> code-server / remobi -->
+  <!-- 3 oauth2-proxy -> code-server -->
   <line x1="666" y1="370" x2="746" y2="370" stroke="#232F3E" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <polyline points="700,370 700,460 746,460" fill="none" stroke="#232F3E" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <circle cx="683" cy="418" r="10" fill="#232F3E"/><text x="683" y="422" font-size="12" font-weight="700" text-anchor="middle" fill="#FFFFFF">3</text>
+  <circle cx="706" cy="356" r="10" fill="#232F3E"/><text x="706" y="360" font-size="12" font-weight="700" text-anchor="middle" fill="#FFFFFF">3</text>
   <!-- EC2 - EBS attachment -->
   <line x1="926" y1="370" x2="982" y2="370" stroke="#232F3E" stroke-width="1.5"/>
   <!-- 8 laptop -> EICE -> EC2 -->
@@ -179,8 +173,8 @@
   <text x="56" y="648" font-size="12" font-weight="600" fill="#232F3E">CloudFront → oauth2-proxy</text>
   <text x="300" y="648" font-size="12" fill="#545B64">VPC origin으로 프라이빗 서브넷의 인스턴스(퍼블릭 IP 없음)에 HTTP :80으로 전달합니다. 보안 그룹은 :80을 CloudFront origin-facing 대역에만 엽니다.</text>
   <circle cx="38" cy="668" r="10" fill="#232F3E"/><text x="38" y="672" font-size="12" font-weight="700" text-anchor="middle" fill="#FFFFFF">3</text>
-  <text x="56" y="672" font-size="12" font-weight="600" fill="#232F3E">oauth2-proxy → code-server · remobi</text>
-  <text x="300" y="672" font-size="12" fill="#545B64">세션 쿠키를 확인한 뒤 / 는 code-server로, /r/ 은 tmux 세션 admin에 붙는 remobi로 프록시합니다(둘 다 WebSocket, 루프백에서만 대기).</text>
+  <text x="56" y="672" font-size="12" font-weight="600" fill="#232F3E">oauth2-proxy → code-server</text>
+  <text x="300" y="672" font-size="12" fill="#545B64">세션 쿠키를 확인한 뒤 모든 요청을 code-server(127.0.0.1:8080)로 프록시합니다. WebSocket을 쓰며 code-server는 루프백에서만 대기합니다.</text>
   <circle cx="38" cy="692" r="10" fill="#232F3E"/><text x="38" y="696" font-size="12" font-weight="700" text-anchor="middle" fill="#FFFFFF">4</text>
   <text x="56" y="696" font-size="12" font-weight="600" fill="#232F3E">브라우저 → Cognito</text>
   <text x="300" y="696" font-size="12" fill="#545B64">세션이 없으면 oauth2-proxy가 Cognito 관리형 로그인(암호 + 선택적 TOTP MFA)으로 보냅니다. 로그인 페이지는 Cognito 접두사 도메인을 씁니다.</text>

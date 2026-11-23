@@ -1,14 +1,14 @@
 <h1 align="center">code2</h1>
 
 <p align="center"><b>내 AWS 계정에 만드는 브라우저용 개인 VS Code 개발 서버</b><br>
-CloudFront → private EC2(Graviton) → code-server · 휴대폰 터미널(remobi), Cognito 로그인(기본 MFA)</p>
+CloudFront → private EC2(Graviton) → code-server · Cognito 로그인(기본 MFA)</p>
 
 ---
 
 ## 한눈에 보기
 
 - CloudFormation 스택 하나로 **전용 VPC, private EC2, CloudFront, Cognito 로그인**이 모두 만들어집니다. 미리 준비할 네트워크나 리소스는 없습니다.
-- 배포가 끝나면 받은 URL에 접속해 Cognito로 로그인(암호 + TOTP, `CODE2_MFA=off`면 암호만)합니다. 로그인하면 바로 VS Code가 열립니다. 같은 로그인으로 `<URL>/r/`에서 휴대폰에 맞춘 터미널([remobi](https://github.com/connorads/remobi))도 씁니다.
+- 배포가 끝나면 받은 URL에 접속해 Cognito로 로그인(암호 + TOTP, `CODE2_MFA=off`면 암호만)합니다. 로그인하면 바로 VS Code가 열립니다.
 - 서버는 공인 IP가 없는 private 서브넷의 EC2(기본 `t4g.medium`, 2 vCPU / 4 GiB, 다른 Graviton·x86 Nitro 타입도 가능)입니다. 외부에서 들어오는 길은 **CloudFront(HTTPS)** 와 **EC2 Instance Connect Endpoint(SSH, IAM 인증)** 두 가지뿐입니다.
 - 작업 공간(`/home`)은 별도 EBS 볼륨에 있어서 인스턴스를 바꿔도 남습니다. 매일 스냅샷으로 백업합니다.
 - 접속 주소는 항상 CloudFront 주소(`https://dxxxx.cloudfront.net`)이고, 로그인 페이지는 Cognito 기본 도메인(`<스택>-<계정>.auth.<리전>.amazoncognito.com`)을 씁니다. 도메인을 따로 준비할 필요가 없습니다.
@@ -28,14 +28,14 @@ export CODE2_ADMIN_EMAIL=you@example.com      # 로그인 메일 (임시 암호�
 
 infra/deploy.sh stack plan     # 사전 점검 후 변경 세트만 만들고 내용을 보여 줍니다
 infra/deploy.sh stack apply    # 실행 (약 15–20분, 서버 설정이 끝날 때까지 기다립니다)
-infra/deploy.sh status         # URL 확인, 서비스가 active active active 이면 준비 완료
+infra/deploy.sh status         # URL 확인, 서비스가 active active 이면 준비 완료
 ```
 
 1. `CODE2_ADMIN_EMAIL`로 임시 암호가 옵니다(7일 유효).
 2. `status`에 나온 CloudFront 주소(`url`)에 접속해 `CODE2_ADMIN_EMAIL` 주소와 임시 암호로 로그인합니다.
 3. 새 암호(기본 12자 이상, `CODE2_PASSWORD_MIN_LENGTH`)를 정하고 인증 앱(Google Authenticator, 1Password 등)에 TOTP를 등록합니다(`CODE2_MFA=off`면 암호만 정합니다).
 
-`stack apply`는 인스턴스가 code-server, remobi, oauth2-proxy를 다 띄웠다고 알려 올 때까지 기다립니다. 설정이 실패하면(다운로드 실패, Cognito 설정 오류 등) 스택이 롤백되고, 실패한 줄과 로그 끝부분이 `BootWait` 이벤트 사유에 나옵니다. 원인을 인스턴스에서 직접 보려면 `CODE2_KEEP_ON_FAILURE=1 infra/deploy.sh stack apply`로 롤백 없이 실행합니다.
+`stack apply`는 인스턴스가 code-server, oauth2-proxy를 다 띄웠다고 알려 올 때까지 기다립니다. 설정이 실패하면(다운로드 실패, Cognito 설정 오류 등) 스택이 롤백되고, 실패한 줄과 로그 끝부분이 `BootWait` 이벤트 사유에 나옵니다. 원인을 인스턴스에서 직접 보려면 `CODE2_KEEP_ON_FAILURE=1 infra/deploy.sh stack apply`로 롤백 없이 실행합니다.
 
 `plan`은 변경 세트를 만들기 전에 스택 이름 규칙, Nitro 인스턴스 타입인지, 그 타입을 제공하는 AZ, VPC·EIP·EICE 할당량을 확인합니다.
 
@@ -44,7 +44,7 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active active �
 ### 전체 구성
 
 <p align="center">
-  <img src="docs/architecture.png" alt="code2 구성도: 브라우저가 CloudFront와 VPC origin을 거쳐 private subnet EC2의 oauth2-proxy(Cognito 로그인)로 들어가 code-server와 remobi에 연결되고, 부팅 때 S3 gateway endpoint로 setup.sh를, Parameter Store에서 설정을 받으며, 노트북은 EC2 Instance Connect Endpoint로 SSH하고 아웃바운드는 NAT gateway와 IGW로 나갑니다" width="100%">
+  <img src="docs/architecture.png" alt="code2 구성도: 브라우저가 CloudFront와 VPC origin을 거쳐 private subnet EC2의 oauth2-proxy(Cognito 로그인)로 들어가 code-server에 연결되고, 부팅 때 S3 gateway endpoint로 setup.sh를, Parameter Store에서 설정을 받으며, 노트북은 EC2 Instance Connect Endpoint로 SSH하고 아웃바운드는 NAT gateway와 IGW로 나갑니다" width="100%">
 </p>
 
 실선은 데이터가 지나는 경로이고, 점선은 인증·설정 같은 제어 경로입니다. 번호는 그림 아래 표의 단계와 같습니다. 바깥에서 들어오는 길은 CloudFront와 EC2 Instance Connect Endpoint 두 곳뿐이고, 인스턴스에는 공인 IP가 없습니다. dnf 저장소와 `setup.sh` 같은 S3 트래픽은 S3 게이트웨이 엔드포인트로 NAT를 거치지 않고 나갑니다. 설정 스크립트를 두는 S3 버킷 `code2-setup-<계정>-<리전>`은 스택 밖에서 `deploy.sh`가 만듭니다. 그림에 없는 Data Lifecycle Manager(일일 스냅샷)도 함께 만들어집니다.
@@ -55,8 +55,7 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active active �
 2. **oauth2-proxy**가 세션 쿠키(`_code2`)를 확인합니다. 쿠키가 없으면 Cognito 관리형 로그인 페이지로 보냅니다. Authorization code + PKCE(S256) 방식입니다.
 3. 사용자가 암호와 TOTP(`Mfa=on`일 때)로 로그인하면 Cognito가 `/oauth2/callback`으로 되돌려 보냅니다. oauth2-proxy는 코드를 토큰으로 바꾸고 ID 토큰을 검증한 뒤 세션 쿠키를 발급합니다.
 4. 이후 요청은 oauth2-proxy가 `127.0.0.1:8080`의 **code-server**로 프록시합니다. 에디터와 터미널이 쓰는 WebSocket도 같은 경로로 지나갑니다. code-server는 `--auth none`이라 따로 로그인을 묻지 않고, 루프백에만 열려 있어서 oauth2-proxy를 거치지 않고는 닿을 수 없습니다.
-   `/r`과 그 아래 요청은 같은 세션으로 `127.0.0.1:7682`의 **remobi**(브라우저 터미널)로 갑니다. remobi도 code-server처럼 루프백에만 열려 있어서 oauth2-proxy를 거쳐야만 닿습니다.
-5. 세션은 로그인한 때부터 최대 `SessionHours`(기본 12시간) 유지됩니다. 활동이 있어도 늘어나지 않습니다. oauth2-proxy가 30분마다 refresh 토큰으로 ID·Access 토큰(60분)을 갱신하고, 쿠키와 refresh 토큰이 만료되면 다시 로그인해야 합니다. remobi 터미널은 tmux 세션에 붙어 있으므로, 다시 로그인하면 하던 화면이 그대로 이어집니다.
+5. 세션은 로그인한 때부터 최대 `SessionHours`(기본 12시간) 유지됩니다. 활동이 있어도 늘어나지 않습니다. oauth2-proxy가 30분마다 refresh 토큰으로 ID·Access 토큰(60분)을 갱신하고, 쿠키와 refresh 토큰이 만료되면 다시 로그인해야 합니다.
 6. 로그아웃은 `status`에 나오는 **logout** 주소로 합니다. oauth2-proxy 세션과 Cognito 세션을 모두 끝내고 로그인 화면으로 돌아옵니다.
 
 ### 부팅과 설정
@@ -87,7 +86,7 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active active �
 | 인스턴스 역할 | SSM 관리, CloudWatch 에이전트, 자기 Cognito 클라이언트 읽기, 자기 `/home` 볼륨 붙이기(이 볼륨 + 이 인스턴스 프로필로 한정) |
 | 인스턴스 | IMDSv2 필수(hop limit 1), EBS 암호화, oauth2-proxy는 전용 시스템 사용자로 실행하고 `:80` 바인딩 권한만 가집니다(`ProtectSystem=strict`) |
 | 패치 | 기본으로 dnf-automatic이 매일 **보안 업데이트**를 적용합니다(최신 AL2023 저장소를 따라감, 자동 재부팅은 하지 않음). 커널 업데이트는 재부팅해야 적용됩니다 |
-| 소프트웨어 | code-server, oauth2-proxy, remobi 버전을 파라미터로 고정합니다. 다운로드는 재시도합니다. oauth2-proxy 파일은 릴리스의 sha256 파일로 무결성을 확인합니다(같은 출처라 위변조 방지는 아닙니다). remobi는 npm이 레지스트리의 integrity 해시로 확인하고, 의존성은 remobi가 정한 버전 범위 안에서 설치 시점의 최신 버전을 받습니다 |
+| 소프트웨어 | code-server, oauth2-proxy 버전을 파라미터로 고정합니다. 다운로드는 재시도합니다. oauth2-proxy 파일은 릴리스의 sha256 파일로 무결성을 확인합니다(같은 출처라 위변조 방지는 아닙니다) |
 
 > 로그인하면 `ec2-user` 권한의 셸과 **sudo**를 쓸 수 있습니다. 인스턴스 역할 자격 증명(위 표)에도 닿을 수 있습니다. 계정은 꼭 필요한 사람에게만 만들어 주세요.
 
@@ -103,12 +102,11 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active active �
 | 사용자 | `ec2-user` (sudo 가능), code-server와 SSH 모두 같은 사용자 |
 | 디스크 | `/` 30 GiB gp3, `/home` 50 GiB gp3 (XFS, 레이블 `code2-home`). 둘 다 파라미터로 바꿀 수 있습니다 |
 | code-server | 4.139.1, `127.0.0.1:8080`, 텔레메트리와 업데이트 확인 끔 |
-| remobi | 1.2.1 (Node.js 22), `127.0.0.1:7682`, `<URL>/r/`. `ec2-user`의 tmux 세션 `admin`을 엽니다 |
 | 확장 마켓플레이스 | Open VSX (code-server 기본값) |
 
 ### 기본 설치 도구
 
-`git`, `python3` (+ `pip`), `gcc`, `gcc-c++`, `make`, `tmux`, `jq`, AWS CLI v2, Node.js 22(`nodejs22`, `node`·`npm`). remobi가 쓰려고 설치하지만, remobi는 `node-22`를 직접 부르므로 다른 Node.js 버전을 기본으로 바꿔도 됩니다. **Docker는 설치되어 있지 않습니다.**
+`git`, `python3` (+ `pip`), `gcc`, `gcc-c++`, `make`, `tmux`, `jq`, AWS CLI v2, Node.js 22(`nodejs22`, `node`·`npm`). setup.sh는 `npm-22`를 직접 부르므로 다른 Node.js 버전을 기본으로 바꿔도 됩니다. **Docker는 설치되어 있지 않습니다.**
 
 AI 코딩 도구(Claude Code, Codex)는 `CODE2_AI_TOOLS=on`일 때만 `ec2-user`의 `/home`에 설치합니다(기본 `off`: 설치하지 않습니다). `off`로 되돌려도 이미 설치한 도구는 지우지 않습니다. 켜면 setup.sh는 CLI가 없거나 실행되지 않을 때(`--version` 실패, 예: 설치가 덜 됐거나 인스턴스 타입을 바꿔 아키텍처가 달라졌을 때)만 그 CLI를 지우고 다시 설치합니다. 버전은 Claude Code는 설정한 업데이트 채널(기본 `latest`)의 최신 버전, Codex는 npm의 최신 버전입니다. 설정(`~/.claude`, `~/.codex`)은 그대로 둡니다. 확장은 없을 때만 설치합니다. 실행되는 도구는 건드리지 않으므로, 인스턴스를 교체해도 쓰던 버전과 설정이 남고 업데이트는 각 도구가 합니다. 이 설치는 서비스가 모두 뜨고 스택에 성공을 알린 뒤 맨 마지막에, 모두 합쳐 최대 15분 동안 합니다. 설치에 실패하거나 시간이 모자라면 경고만 남기고, 다음 setup 실행(재부팅, `reconfigure`) 때 다시 설치합니다. 로그인과 모델 설정(예: Bedrock)은 직접 합니다.
 
@@ -132,7 +130,6 @@ AI 코딩 도구(Claude Code, Codex)는 `CODE2_AI_TOOLS=on`일 때만 `ec2-user`
 | 방법 | 방법 |
 |---|---|
 | 브라우저 | `infra/deploy.sh status`의 URL에서 로그인. 터미널은 `` Ctrl+` ``. 로그아웃은 `status`의 logout 주소 |
-| 브라우저 터미널 | `<URL>/r/`에서 에디터 없이 터미널만 엽니다(로그인은 code-server와 같은 세션). 휴대폰에 맞춘 [remobi](https://github.com/connorads/remobi)이고, tmux 세션 `admin`에 붙으므로 창을 닫았다 열어도 작업이 이어지고, SSH에서는 `tmux attach -t admin`으로 같은 화면을 봅니다. 터치 툴바(Esc, Prefix 등)와 명령 서랍이 있고, 좌우로 밀면 tmux 창이 바뀌고 두 손가락으로 글자 크기를 바꿉니다. 브라우저 메뉴의 "홈 화면에 추가"로 앱처럼 쓸 수 있습니다. 이때 상태 표시줄은 불투명(`black`)이라 터미널이 그 아래에서 시작합니다. 툴바는 한 줄(Esc, Prefix, Tab, 방향키, C-c, ☰)이고 나머지 키(Paste, ⏎, ⌫, Space, S-Tab, C-d 등)와 tmux 명령은 ☰ 서랍에 있습니다. 툴바 두께와 버튼 크기(높이 40px, 폭 60px, 좁은 화면에서는 폭이 줄어듦)는 remobi에 스타일 설정이 없어서 setup.sh가 remobi의 `client.css` 뒤에 `/etc/remobi/compact.css`를 덧붙여 정합니다. 이 배치는 setup.sh가 `/etc/remobi/remobi.config.mjs`로 관리하고, 버튼과 제스처를 더 바꾸려면 `/etc/remobi/remobi.config.local.mjs`에 덮어쓸 값만 적은 뒤 `sudo systemctl restart remobi` 합니다 |
 | 개발 서버 미리 보기 | 인스턴스에서 띄운 웹 서버는 `<URL>/proxy/<포트>/` 로 엽니다(로그인 필요). 경로 접두사를 그대로 넘기려면 `/absproxy/<포트>/` 를 씁니다 |
 | SSH | `infra/deploy.sh ssh` |
 | VS Code Remote-SSH | `infra/deploy.sh ssh-config`가 출력하는 블록을 `~/.ssh/config`에 붙이고, 접속 전에 같은 출력에 있는 `send-ssh-public-key` 명령으로 키를 넣습니다 |
@@ -148,7 +145,7 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 |---|---|
 | `infra/deploy.sh stack plan` | 변경 세트를 만들고 변경 내용만 보여 줍니다. 아무것도 바꾸지 않습니다 |
 | `infra/deploy.sh stack apply` | `setup.sh`를 S3에 올리고 가장 최근 변경 세트를 실행한 뒤, 인스턴스에서 `setup.sh`를 다시 실행합니다. plan 이후 템플릿이나 `setup.sh`가 바뀌었으면 실행하지 않습니다 |
-| `infra/deploy.sh status` | URL, 터미널 주소(`/r/`), 로그아웃 주소, 인스턴스 상태, 서비스 상태(code-server, oauth2-proxy, remobi), `/home` 사용량, 설치된 버전을 보여 줍니다 |
+| `infra/deploy.sh status` | URL, 로그아웃 주소, 인스턴스 상태, 서비스 상태(code-server, oauth2-proxy), `/home` 사용량, 설치된 버전을 보여 줍니다 |
 | `infra/deploy.sh logs [-f] [기간]` | CloudWatch Logs의 설정 로그를 봅니다(기본 최근 1시간, 예: `logs 1d`, `logs -f`) |
 | `infra/deploy.sh reconfigure` | `setup.sh`를 S3에 올리고 재시작 없이 인스턴스에서 실행합니다(스택 변경 없이 `setup.sh`만 바꿨을 때) |
 | `infra/deploy.sh ssh [명령]` | EICE를 거쳐 `ec2-user`로 SSH 접속합니다 |
@@ -169,7 +166,6 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 | `CODE2_DATA_SIZE` | `50` | 늘리기만 | `/home` GiB. 늘리면 다음 설정 실행 때 파일시스템도 늘립니다 |
 | `CODE2_ROOT_SIZE` | `30` | 언제든 | `/` GiB. 바꾸면 인스턴스 교체 |
 | `CODE2_CODE_SERVER_VERSION` / `CODE2_OAUTH2_PROXY_VERSION` | `4.139.1` / `7.15.5` | 언제든 | 재시작 없이 새 버전을 설치하고 그 서비스만 재시작합니다 |
-| `CODE2_REMOBI_VERSION` | `1.2.1` | 언제든 | `/r/` 터미널(remobi) 버전. 위와 같이 그 자리에서 설치합니다 |
 | `CODE2_SESSION_HOURS` | `12` | 언제든 | 로그인 유지 시간(1–168) |
 | `CODE2_MFA` | `on` | 언제든 | `on`: 첫 로그인 때 TOTP를 등록하고 매번 코드를 입력합니다. `off`: 암호만. 나중에 `on`으로 바꾸면 사용자는 다음 로그인 때 TOTP를 등록합니다. Cognito의 OPTIONAL은 관리형 로그인이 TOTP 등록 화면을 띄우지 않아 넣지 않았습니다 |
 | `CODE2_AUTO_UPDATES` | `true` | 언제든 | 매일 보안 업데이트 |
@@ -261,10 +257,9 @@ aws cognito-idp admin-create-user --user-pool-id <UserPoolId> --username <메일
 ### 인스턴스에서 직접 확인
 
 ```bash
-systemctl status code-server oauth2-proxy remobi
+systemctl status code-server oauth2-proxy
 journalctl -u oauth2-proxy -n 50        # 로그인 / 콜백 오류
 journalctl -u code-server -n 50
-journalctl -u remobi -n 50              # /r/ 터미널
 sudo tail -n 50 /var/log/code2-setup.log # 부팅 설정 기록 (매 부팅)
 ```
 
@@ -318,7 +313,7 @@ code2/
 └── infra/
     ├── code2.yaml               CloudFormation: VPC·NAT·EICE, Cognito, EC2·EBS, CloudFront VPC origin,
     │                            CloudWatch 로그·알람, DLM 백업
-    ├── setup.sh                 인스턴스 설정 스크립트: /home, code-server, remobi, oauth2-proxy, CloudWatch, 업데이트, 유휴 중지
+    ├── setup.sh                 인스턴스 설정 스크립트: /home, code-server, oauth2-proxy, CloudWatch, 업데이트, 유휴 중지
     ├── deploy.sh                plan/apply(사전 점검·이관 포함), status, logs, reconfigure, ssh, shell, stop/start, destroy
     └── lint.sh                  cfn-lint, shellcheck (deploy.sh, setup.sh, user data), 템플릿 크기, 개인 정보 검사
 ```

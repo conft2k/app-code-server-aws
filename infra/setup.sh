@@ -32,9 +32,9 @@ trap 'fail "line $LINENO exited $?"' ERR
 
 # Stack settings (SetupConfig in code2.yaml); only these names are taken from the parameter. A new name needs a
 # default here: the stack may still hold an older parameter (reconfigure before apply, or a rolled-back update).
-code_server_version='' oauth2_proxy_version='' remobi_version=1.2.1 auto_updates='' ai_tools=off idle_hours=''
+code_server_version='' oauth2_proxy_version='' auto_updates='' ai_tools=off idle_hours=''
 session_hours='' vol='' user_pool='' cognito_host='' log_group=''
-settings="code_server_version oauth2_proxy_version remobi_version auto_updates ai_tools idle_hours session_hours vol user_pool
+settings="code_server_version oauth2_proxy_version auto_updates ai_tools idle_hours session_hours vol user_pool
   cognito_host log_group"
 cfg=$(retry aws ssm get-parameter --region "$region" --name "/$stack/setup" --query Parameter.Value --output text)
 # shellcheck disable=SC2086
@@ -63,7 +63,7 @@ case $(uname -m) in
   *) fail "unsupported architecture $(uname -m)" ;;
 esac
 work=$(mktemp -d)
-log "start (code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, remobi ${remobi_version}, $arch)"
+log "start (code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, $arch)"
 
 # ---- hostname: the stack name, not ip-10-...; cloud-init would set the EC2 name again at boot ----
 host=${stack,,}; host=${host:0:63}; host=${host%%-}
@@ -71,7 +71,7 @@ printf 'preserve_hostname: true\n' | put /etc/cloud/cloud.cfg.d/99-code2-hostnam
 [ "$(hostname)" = "$host" ] || hostnamectl set-hostname "$host"
 
 # ---- packages ----
-# nodejs22 and gcc-c++ for remobi (node-pty builds with node-gyp)
+# nodejs22 for npm-22 (Codex with ai_tools=on) and as a general tool
 pkgs="git tmux jq gcc gcc-c++ make tar xfsprogs python3-pip amazon-cloudwatch-agent nodejs22 nodejs22-npm"
 if [ "$auto_updates" = true ]; then
   echo latest | put /etc/dnf/vars/releasever 644 || true   # follow new AL2023 releases, not the AMI's
@@ -139,7 +139,7 @@ WantedBy=multi-user.target
 UNIT
 svc code-server "$cs_restart"
 
-# ---- ttyd, the earlier terminal at /admin/ (replaced by remobi): removed if still there ----
+# ---- ttyd, the earlier terminal at /admin/: removed if still there ----
 if [ -f /etc/systemd/system/ttyd.service ]; then
   log "removing ttyd"
   systemctl disable -q --now ttyd || true
@@ -148,96 +148,13 @@ if [ -f /etc/systemd/system/ttyd.service ]; then
   systemctl daemon-reload
 fi
 
-# ---- remobi, the phone terminal at /r/, behind oauth2-proxy ----
-rd=/usr/local/lib/remobi-${remobi_version}
-rcli=$rd/lib/node_modules/remobi/dist/cli.mjs
-if [ ! -f "$rcli" ]; then
-  log "installing remobi ${remobi_version}"
-  rm -rf "$work/remobi"
-  # npm checks each package against the registry's integrity hash; dependencies follow remobi's ranges.
-  HOME=/root retry npm-22 install -g -q --no-audit --no-fund --omit=dev --prefix "$work/remobi" "remobi@${remobi_version}"
-  rm -rf "$rd" && mv "$work/remobi" "$rd"
-fi
-rm_restart=
-[ "$(readlink -f /usr/local/bin/remobi)" = "$rcli" ] || rm_restart=1
-ln -sfn "$rd/bin/remobi" /usr/local/bin/remobi
-# Thinner toolbar: remobi has no style setting, so this CSS is appended to the stylesheet it inlines at start.
-put /etc/remobi/compact.css 644 <<'CSS' || true
-/* code2: no empty second row, tighter padding, half the home-indicator inset */
-#wt-toolbar .wt-row:empty{display:none}
-#wt-toolbar{padding:3px 4px calc(3px + env(safe-area-inset-bottom,0px) * .5) 4px}
-/* 40px buttons with or without the keyboard; 60px wide, shrinking to fit a narrow screen */
-#wt-toolbar button,#wt-toolbar.wt-kb-open button{min-height:40px}
-#wt-toolbar .wt-row:first-child button{width:60px}
-CSS
-rcss=$rd/lib/node_modules/remobi/dist/client.css
-[ -f "$rcss.orig" ] || cp "$rcss" "$rcss.orig"
-cat "$rcss.orig" /etc/remobi/compact.css | put "$rcss" 644 && rm_restart=1 || true
-# Opaque status bar: as a home-screen app with black-translucent, iPadOS 18.7 sizes the page short by the
-# status bar (innerHeight 712 on a 744pt screen) yet draws it from the top of the screen, so the top rows sit
-# under the status bar and the toolbar floats 32pt above the bottom. iOS reads the style when the app launches.
-for f in "$rd"/lib/node_modules/remobi/dist/meta-tags-*.mjs; do
-  if grep -q black-translucent "$f"; then sed -i 's/black-translucent/black/' "$f" && rm_restart=1; fi
-done
-# Toolbar on one row so the terminal keeps the screen; overrides go in /etc/remobi/remobi.config.local.mjs.
-put /etc/remobi/remobi.config.mjs 644 <<'CFG' && rm_restart=1 || true
-// code2: one toolbar row; the rest of the keys move to the ☰ drawer.
-const send = (id, label, description, data) => ({ id, label, description, action: { type: 'send', data } })
-const moved = new Set(['shift-tab', 'enter'])
-export default {
-  toolbar: {
-    row1: (defaults) => [
-      ...defaults.filter((b) => !moved.has(b.id)),
-      { id: 'drawer-toggle', label: '☰', description: 'Open command drawer', action: { type: 'drawer-toggle' } },
-    ],
-    row2: [],
-  },
-  drawer: {
-    buttons: (defaults) => [
-      { id: 'paste', label: 'Paste', description: 'Paste from clipboard', action: { type: 'paste' } },
-      send('enter', '⏎', 'Send Enter', '\r'),
-      send('backspace', '⌫', 'Send Backspace key', '\x7f'),
-      send('space', 'Space', 'Send Space', ' '),
-      send('shift-tab', 'S-Tab', 'Send Shift+Tab', '\x1b[Z'),
-      send('ctrl-d', 'C-d', 'Send Ctrl+D', '\x04'),
-      send('alt-enter', 'M-↵', 'Send Alt+Enter (ESC + Enter)', '\x1b\r'),
-      send('q', 'q', 'Send q', 'q'),
-      ...defaults,
-    ],
-  },
-  // Double-tap the terminal for Tab (completion without reaching for the toolbar).
-  gestures: { doubleTap: { enabled: true, data: '\t' } },
-}
-CFG
 # tmux 3.6a segfaults on copy mode's refresh-from-pane (r) after the window was resized, e.g. by a second
-# remobi client, and the crash takes every session down. /etc/tmux.conf loads before ~/.tmux.conf.
+# client, and the crash takes every session down. /etc/tmux.conf loads before ~/.tmux.conf.
 put /etc/tmux.conf 644 <<'TMUX' && runuser -u ec2-user -- tmux source-file /etc/tmux.conf 2>/dev/null || true
 # code2: r in copy mode runs refresh-from-pane, which crashes tmux 3.6a
 unbind-key -T copy-mode r
 unbind-key -T copy-mode-vi r
 TMUX
-# tmux session admin, so a closed tab picks up where it left off. Loopback only; remobi checks the WebSocket
-# Origin against Host, which CloudFront and oauth2-proxy pass through.
-# KillMode=process keeps tmux on restart.
-put /etc/systemd/system/remobi.service 644 <<'UNIT' && rm_restart=1 || true
-[Unit]
-Description=remobi phone terminal for ec2-user at /r/
-After=network-online.target home.mount
-RequiresMountsFor=/home/ec2-user
-
-[Service]
-User=ec2-user
-WorkingDirectory=/home/ec2-user
-Environment=HOME=/home/ec2-user
-ExecStart=/usr/bin/node-22 /usr/local/bin/remobi serve --host 127.0.0.1 --port 7682 --base-path /r --config /etc/remobi/remobi.config.mjs -- tmux new -A -s admin
-KillMode=process
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-svc remobi "$rm_restart"
 
 # ---- oauth2-proxy (Cognito OIDC) on :80 ----
 opd=/usr/local/lib/oauth2-proxy-v${oauth2_proxy_version}
@@ -268,8 +185,7 @@ client_id=$(jq -r .clientId <<<"$conf")
 url=$(jq -r .url <<<"$conf")
 put /etc/oauth2-proxy/oauth2-proxy.cfg 644 <<CFG && op_restart=1 || true
 http_address = "0.0.0.0:80"
-# "/r/" matches the prefix; "/r" alone matches only itself and remobi redirects it to /r/
-upstreams = ["http://127.0.0.1:8080/", "http://127.0.0.1:7682/r/", "http://127.0.0.1:7682/r"]
+upstreams = ["http://127.0.0.1:8080/"]
 provider = "oidc"
 provider_display_name = "Cognito"
 oidc_issuer_url = "https://cognito-idp.$region.amazonaws.com/${user_pool}"
@@ -305,7 +221,7 @@ printf 'OAUTH2_PROXY_CLIENT_SECRET=%s\nOAUTH2_PROXY_COOKIE_SECRET=%s\n' "$secret
   | put /etc/oauth2-proxy/secrets.env 600 && op_restart=1 || true
 put /etc/systemd/system/oauth2-proxy.service 644 <<'UNIT' && op_restart=1 || true
 [Unit]
-Description=oauth2-proxy (Cognito sign-in in front of code-server and remobi)
+Description=oauth2-proxy (Cognito sign-in in front of code-server)
 After=network-online.target
 Wants=network-online.target
 
@@ -415,7 +331,7 @@ HOOK
 
 rm -rf "$work"
 log "done"
-signal SUCCESS "code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, remobi ${remobi_version} running"
+signal SUCCESS "code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version} running"
 
 # ---- Claude Code and Codex for ec2-user: CLIs and code-server extensions (only with ai_tools=on) ----
 # Last, after the BootWait signal: they are optional, and their downloads must not hold up the services or the

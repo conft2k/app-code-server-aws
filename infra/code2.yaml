@@ -11,7 +11,7 @@ Metadata:
         Parameters: [AdminEmail, Mfa, PasswordMinLength, SessionHours]
       - Label: { default: Server }
         Parameters: [InstanceType, ImageId, RootVolumeSize, DataVolumeSize, DataSnapshotId, CodeServerVersion,
-                     OAuth2ProxyVersion, RemobiVersion, AutoUpdates, AiTools, IdleStopHours]
+                     OAuth2ProxyVersion, AutoUpdates, AiTools, IdleStopHours]
       - Label: { default: Operations }
         Parameters: [BackupRetainCount, AlarmEmail, WaitForBoot, OriginSlot, SetupBucket]
       - Label: { default: Network (create-time) }
@@ -82,11 +82,6 @@ Parameters:
     Default: 7.15.5
     AllowedPattern: '^\d+\.\d+\.\d+$'
     Description: Installed in place by deploy.sh (no restart)
-  RemobiVersion:
-    Type: String
-    Default: 1.2.1
-    AllowedPattern: '^\d+\.\d+\.\d+$'
-    Description: Phone terminal at /r/ (npm package remobi); installed in place by deploy.sh (no restart)
   AutoUpdates:
     Type: String
     Default: "true"
@@ -431,7 +426,7 @@ Resources:
       Value: !Sub
         - >-
           {"code_server_version":"${CodeServerVersion}","oauth2_proxy_version":"${OAuth2ProxyVersion}",
-          "remobi_version":"${RemobiVersion}","auto_updates":"${AutoUpdates}","ai_tools":"${AiTools}","idle_hours":"${IdleStopHours}",
+          "auto_updates":"${AutoUpdates}","ai_tools":"${AiTools}","idle_hours":"${IdleStopHours}",
           "session_hours":"${SessionHours}","vol":"${DataVolume}","user_pool":"${UserPool}",
           "cognito_host":"${CognitoHost}","log_group":"${LogGroup}"}
         # Not from UserPoolDomain (it would make the instance wait for the domain).
