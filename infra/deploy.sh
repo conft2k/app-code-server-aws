@@ -32,9 +32,6 @@ Settings (environment). Unset ones keep their current value on update; create-ti
   CODE2_SESSION_HOURS          sign-in lifetime (default 12)
   CODE2_MFA                    on|off TOTP at sign-in (default on)
   CODE2_PASSWORD_MIN_LENGTH    minimum password length, 8-99 (default 12)
-  CODE2_AUTH_DOMAIN            custom name for the Cognito sign-in pages, e.g. auth.code.example.com (needs
-                               CODE2_DOMAIN; empty goes back to the prefix domain)
-  CODE2_AUTH_CERT_ARN          its certificate (default: an issued us-east-1 certificate covering it)
   CODE2_AUTO_UPDATES           true|false daily security updates (default true)
   CODE2_AI_TOOLS               on|off install Claude Code and Codex for ec2-user (default off; off keeps installed ones)
   CODE2_IDLE_STOP_HOURS        stop after this many idle hours (default 0 = never)
@@ -44,9 +41,6 @@ Settings (environment). Unset ones keep their current value on update; create-ti
   CODE2_UPDATE_AMI=1           move to the latest AL2023 AMI (replaces the instance; /home stays)
   CODE2_KEEP_ON_FAILURE=1      apply without rollback, to inspect a failed create
   create-time:
-  CODE2_DOMAIN                 custom name, e.g. code.example.com (Route 53 public zone + us-east-1 ACM cert)
-  CODE2_ZONE / CODE2_ZONE_ID   hosted zone name or id of CODE2_DOMAIN (default: found from the domain)
-  CODE2_CERT_ARN               certificate (default: an issued us-east-1 certificate covering CODE2_DOMAIN)
   CODE2_AZ                     AZ (default: the first one offering the instance type)
   CODE2_RESTORE_SNAPSHOT       snap-... to create /home from (a snapshot of an earlier code2 /home)
 EOF
@@ -147,8 +141,8 @@ TUNABLES="InstanceType:CODE2_INSTANCE_TYPE DataVolumeSize:CODE2_DATA_SIZE RootVo
   SessionHours:CODE2_SESSION_HOURS Mfa:CODE2_MFA PasswordMinLength:CODE2_PASSWORD_MIN_LENGTH AutoUpdates:CODE2_AUTO_UPDATES AiTools:CODE2_AI_TOOLS IdleStopHours:CODE2_IDLE_STOP_HOURS
   BackupRetainCount:CODE2_BACKUP_COUNT AlarmEmail:CODE2_ALARM_EMAIL PriceClass:CODE2_PRICE_CLASS
   AdminUsername:CODE2_ADMIN_USER AdminEmail:CODE2_ADMIN_EMAIL"
-# Fixed after create (network, edge, the volume's source, the boot signal).
-CREATE_ONLY="AvailabilityZone VpcCidr PublicSubnetCidr PrivateSubnetCidr DomainName HostedZoneId CertificateArn DataSnapshotId WaitForBoot"
+# Fixed after create (network, the volume's source, the boot signal).
+CREATE_ONLY="AvailabilityZone VpcCidr PublicSubnetCidr PrivateSubnetCidr DataSnapshotId WaitForBoot"
 
 arch_of() { aws ec2 describe-instance-types --instance-types "$1" --query 'InstanceTypes[0].ProcessorInfo.SupportedArchitectures' \
   --output text 2>/dev/null | tr '\t' '\n' | grep -E '^(arm64|x86_64)$' | head -1 || true; }
@@ -172,46 +166,6 @@ prefix_list() {
   echo "$id"
 }
 
-# Hosted zone: CODE2_ZONE_ID, else CODE2_ZONE, else the closest public zone that DOMAIN sits in.
-find_zone() {
-  local name id
-  if [ -n "${CODE2_ZONE_ID:-}" ]; then echo "${CODE2_ZONE_ID#/hostedzone/}"; return; fi
-  name=${CODE2_ZONE:-$1}
-  while :; do
-    id=$(aws route53 list-hosted-zones-by-name --dns-name "$name" --max-items 10 --output json \
-      | jq -r --arg n "$name." '.HostedZones[] | select(.Name == $n and (.Config.PrivateZone | not)) | .Id' | head -1)
-    if [ -n "$id" ]; then echo "${id#/hostedzone/}"; return; fi
-    [ -z "${CODE2_ZONE:-}" ] && [[ "$name" == *.*.* ]] || break
-    name=${name#*.}
-  done
-  die "no Route 53 public hosted zone for $1 (set CODE2_ZONE or CODE2_ZONE_ID)"
-}
-
-# find_cert <domain> [arn]: the given ARN, else an issued us-east-1 certificate whose names (SANs included) cover it.
-find_cert() {
-  local arn
-  if [ -n "${2:-}" ]; then echo "$2"; return; fi
-  arn=$(aws acm list-certificates --region us-east-1 --certificate-statuses ISSUED \
-      --includes keyTypes=RSA_2048,RSA_3072,RSA_4096,EC_prime256v1,EC_secp384r1 --output json \
-    | jq -r --arg d "$1" --arg w "*.${1#*.}" \
-      '[.CertificateSummaryList[] | select(((.SubjectAlternativeNameSummaries // []) + [.DomainName]) | any(. == $d or . == $w))][0].CertificateArn // empty')
-  [ -n "$arn" ] || die "no issued us-east-1 ACM certificate covers $1 (request one, or pass its ARN)"
-  echo "$arn"
-}
-
-# Cognito custom domain: CODE2_AUTH_DOMAIN may be set, changed or emptied at any time (the domain is replaced).
-auth_domain_params() {
-  local cert
-  if [ -n "${CODE2_AUTH_DOMAIN:-}" ]; then
-    cert=$(find_cert "$CODE2_AUTH_DOMAIN" "${CODE2_AUTH_CERT_ARN:-}")
-    param AuthDomainName "$CODE2_AUTH_DOMAIN"; param AuthCertificateArn "$cert"
-  elif is_set CODE2_AUTH_DOMAIN; then
-    param AuthDomainName ""; param AuthCertificateArn ""
-  elif [ "${1:-}" = keep ]; then
-    keep AuthDomainName; keep AuthCertificateArn
-  fi
-}
-
 preflight_create() {
   local type=$1 az=$2 n
   [[ "$STACK" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || die "CODE2_STACK must be lowercase letters, digits and hyphens"
@@ -229,7 +183,7 @@ preflight_create() {
 }
 
 params_create() {
-  local type=${CODE2_INSTANCE_TYPE:-t4g.medium} arch ami az="${CODE2_AZ:-}" pair k v zone cert pl
+  local type=${CODE2_INSTANCE_TYPE:-t4g.medium} arch ami az="${CODE2_AZ:-}" pair k v pl
   [ -n "${CODE2_ADMIN_EMAIL:-}" ] || die "set CODE2_ADMIN_EMAIL (the temporary password goes there)"
   arch=$(arch_of "$type"); [ -n "$arch" ] || die "unknown instance type $type in $AWS_REGION"
   check_nitro "$type"
@@ -245,20 +199,13 @@ params_create() {
   preflight_create "$type" "$az"
   param AvailabilityZone "$az"
 
-  if [ -n "${CODE2_DOMAIN:-}" ]; then
-    param DomainName "$CODE2_DOMAIN"
-    zone=$(find_zone "$CODE2_DOMAIN"); param HostedZoneId "$zone"
-    cert=$(find_cert "$CODE2_DOMAIN" "${CODE2_CERT_ARN:-}"); param CertificateArn "$cert"
-  fi
-  [ -z "${CODE2_AUTH_DOMAIN:-}" ] || [ -n "${CODE2_DOMAIN:-}" ] || die "CODE2_AUTH_DOMAIN needs CODE2_DOMAIN"
-  auth_domain_params
   [ -z "${CODE2_RESTORE_SNAPSHOT:-}" ] || param DataSnapshotId "$CODE2_RESTORE_SNAPSHOT"
 
   for pair in $TUNABLES; do
     k=${pair%%:*} v=${pair#*:}
     if is_set "$v"; then param "$k" "${!v}"; fi
   done
-  echo "create $STACK in $AWS_REGION ($caller): $type $arch in $az${CODE2_DOMAIN:+, https://$CODE2_DOMAIN}"
+  echo "create $STACK in $AWS_REGION ($caller): $type $arch in $az"
 }
 
 params_update() {
@@ -278,8 +225,7 @@ params_update() {
     fi
   done
   if has OriginSlot; then keep OriginSlot; fi
-  if has AuthDomainName; then auth_domain_params keep; else auth_domain_params; fi
-  for v in CODE2_DOMAIN CODE2_AZ CODE2_RESTORE_SNAPSHOT; do
+  for v in CODE2_AZ CODE2_RESTORE_SNAPSHOT; do
     [ -z "${!v:-}" ] || warn "$v only applies when the stack is created; ignored"
   done
 

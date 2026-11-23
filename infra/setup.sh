@@ -273,7 +273,7 @@ upstreams = ["http://127.0.0.1:8080/", "http://127.0.0.1:7682/r/", "http://127.0
 provider = "oidc"
 provider_display_name = "Cognito"
 oidc_issuer_url = "https://cognito-idp.$region.amazonaws.com/${user_pool}"
-# Explicit endpoints: discovery may report the old domain while it is replaced.
+# Explicit endpoints (the Cognito prefix domain), no discovery call at start.
 skip_oidc_discovery = true
 login_url = "https://${cognito_host}/oauth2/authorize"
 redeem_url = "https://${cognito_host}/oauth2/token"

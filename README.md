@@ -11,7 +11,7 @@ CloudFront → private EC2(Graviton) → code-server · 휴대폰 터미널(remo
 - 배포가 끝나면 받은 URL에 접속해 Cognito로 로그인(암호 + TOTP, `CODE2_MFA=off`면 암호만)합니다. 로그인하면 바로 VS Code가 열립니다. 같은 로그인으로 `<URL>/r/`에서 휴대폰에 맞춘 터미널([remobi](https://github.com/connorads/remobi))도 씁니다.
 - 서버는 공인 IP가 없는 private 서브넷의 EC2(기본 `t4g.medium`, 2 vCPU / 4 GiB, 다른 Graviton·x86 Nitro 타입도 가능)입니다. 외부에서 들어오는 길은 **CloudFront(HTTPS)** 와 **EC2 Instance Connect Endpoint(SSH, IAM 인증)** 두 가지뿐입니다.
 - 작업 공간(`/home`)은 별도 EBS 볼륨에 있어서 인스턴스를 바꿔도 남습니다. 매일 스냅샷으로 백업합니다.
-- 도메인은 없어도 됩니다. 기본으로 CloudFront 주소(`https://dxxxx.cloudfront.net`)를 쓰고, Route 53 도메인이 있으면 `code.example.com` 같은 주소로 붙일 수 있습니다.
+- 접속 주소는 항상 CloudFront 주소(`https://dxxxx.cloudfront.net`)이고, 로그인 페이지는 Cognito 기본 도메인(`<스택>-<계정>.auth.<리전>.amazoncognito.com`)을 씁니다. 도메인을 따로 준비할 필요가 없습니다.
 
 ## 빠른 시작
 
@@ -23,7 +23,6 @@ git clone https://github.com/conft2k/app-code2.git && cd app-code2
 export AWS_REGION=ap-northeast-2              # 원하는 리전
 export CODE2_ADMIN_EMAIL=you@example.com      # 임시 암호를 받을 메일
 # export CODE2_ADMIN_USER=alice               # 로그인 이름 (기본 admin)
-# export CODE2_DOMAIN=code.example.com        # 선택: 내 도메인 (아래 "내 도메인 쓰기")
 # export CODE2_MFA=off                        # 선택: TOTP 없이 암호만 (기본 on)
 # export CODE2_AI_TOOLS=on                    # 선택: Claude Code, Codex 설치 (기본 off)
 # export CODE2_ALARM_EMAIL=you@example.com    # 선택: 장애 알림 메일 (아래 "모니터링")
@@ -34,22 +33,12 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active active �
 ```
 
 1. `CODE2_ADMIN_EMAIL`로 임시 암호가 옵니다(7일 유효).
-2. `status`에 나온 URL에 접속해 임시 암호로 로그인합니다.
+2. `status`에 나온 CloudFront 주소(`url`)에 접속해 임시 암호로 로그인합니다.
 3. 새 암호(기본 12자 이상, `CODE2_PASSWORD_MIN_LENGTH`)를 정하고 인증 앱(Google Authenticator, 1Password 등)에 TOTP를 등록합니다(`CODE2_MFA=off`면 암호만 정합니다).
 
 `stack apply`는 인스턴스가 code-server, remobi, oauth2-proxy를 다 띄웠다고 알려 올 때까지 기다립니다. 설정이 실패하면(다운로드 실패, Cognito 설정 오류 등) 스택이 롤백되고, 실패한 줄과 로그 끝부분이 `BootWait` 이벤트 사유에 나옵니다. 원인을 인스턴스에서 직접 보려면 `CODE2_KEEP_ON_FAILURE=1 infra/deploy.sh stack apply`로 롤백 없이 실행합니다.
 
 `plan`은 변경 세트를 만들기 전에 스택 이름 규칙, Nitro 인스턴스 타입인지, 그 타입을 제공하는 AZ, VPC·EIP·EICE 할당량을 확인합니다.
-
-### 내 도메인 쓰기 (선택)
-
-1. Route 53에 공개 호스티드 존(예: `example.com`)이 있어야 합니다.
-2. **us-east-1**에 `*.example.com` 또는 `code.example.com`을 포함하는 발급 완료된 ACM 인증서가 있어야 합니다(CloudFront용). SAN에 들어 있어도 되고, RSA·ECDSA 모두 찾습니다.
-3. 첫 `stack plan` 전에 `CODE2_DOMAIN=code.example.com`을 지정합니다. 스크립트가 도메인이 속한 공개 호스티드 존과 인증서를 찾아 넣고, A/AAAA 레코드를 만듭니다. 자동으로 못 찾으면 `CODE2_ZONE`(존 이름) 또는 `CODE2_ZONE_ID`, `CODE2_CERT_ARN`으로 지정합니다.
-
-도메인은 처음 만들 때 정합니다. 나중에 바꾸면 Cognito 콜백 주소와 인스턴스 설정이 어긋나므로, 스택을 새로 만드는 편이 안전합니다.
-
-Cognito 로그인 페이지도 내 도메인으로 바꿀 수 있습니다(기본은 `<스택>-<계정>.auth.<리전>.amazoncognito.com`). `CODE2_AUTH_DOMAIN=auth.code.example.com`처럼 `CODE2_DOMAIN` 아래 이름을 지정하면, 스크립트가 그 이름을 덮는 us-east-1 인증서(`CODE2_AUTH_CERT_ARN`로 지정 가능)를 찾아 넣고 A/AAAA 레코드를 만듭니다. Cognito는 상위 이름(`code.example.com`)의 A 레코드가 있어야 커스텀 도메인을 만들 수 있어서, 사이트 레코드가 생긴 뒤에 만들어집니다. 생성 후에도 켜고 끌 수 있습니다(도메인이 교체되고 인스턴스 재시작 없이 oauth2-proxy만 다시 시작되며, 그동안 로그인이 잠시 안 될 수 있습니다).
 
 ## 동작 아키텍처
 
@@ -59,7 +48,7 @@ Cognito 로그인 페이지도 내 도메인으로 바꿀 수 있습니다(기�
   <img src="docs/architecture.png" alt="code2 구성도: 브라우저가 CloudFront와 VPC origin을 거쳐 private subnet EC2의 oauth2-proxy(Cognito 로그인)로 들어가 code-server와 remobi에 연결되고, 부팅 때 S3 gateway endpoint로 setup.sh를, Parameter Store에서 설정을 받으며, 노트북은 EC2 Instance Connect Endpoint로 SSH하고 아웃바운드는 NAT gateway와 IGW로 나갑니다" width="100%">
 </p>
 
-실선은 데이터가 지나는 경로이고, 점선은 인증·설정 같은 제어 경로입니다. 번호는 그림 아래 표의 단계와 같습니다. 바깥에서 들어오는 길은 CloudFront와 EC2 Instance Connect Endpoint 두 곳뿐이고, 인스턴스에는 공인 IP가 없습니다. dnf 저장소와 `setup.sh` 같은 S3 트래픽은 S3 게이트웨이 엔드포인트로 NAT를 거치지 않고 나갑니다. 설정 스크립트를 두는 S3 버킷 `code2-setup-<계정>-<리전>`은 스택 밖에서 `deploy.sh`가 만듭니다. 그림에 없는 Data Lifecycle Manager(일일 스냅샷)와, 도메인을 쓸 때의 Route 53 레코드·ACM 인증서도 함께 만들어집니다.
+실선은 데이터가 지나는 경로이고, 점선은 인증·설정 같은 제어 경로입니다. 번호는 그림 아래 표의 단계와 같습니다. 바깥에서 들어오는 길은 CloudFront와 EC2 Instance Connect Endpoint 두 곳뿐이고, 인스턴스에는 공인 IP가 없습니다. dnf 저장소와 `setup.sh` 같은 S3 트래픽은 S3 게이트웨이 엔드포인트로 NAT를 거치지 않고 나갑니다. 설정 스크립트를 두는 S3 버킷 `code2-setup-<계정>-<리전>`은 스택 밖에서 `deploy.sh`가 만듭니다. 그림에 없는 Data Lifecycle Manager(일일 스냅샷)도 함께 만들어집니다.
 
 ### 브라우저 접속 흐름
 
@@ -195,8 +184,6 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 | `CODE2_KEEP_ON_FAILURE=1` | – | apply 때 | 실패해도 롤백하지 않습니다(원인 조사용) |
 | `CODE2_SSH_KEY` | `~/.ssh/id_ed25519` | – | SSH에 쓸 키(없으면 만듭니다) |
 | `CODE2_PASSWORD_MIN_LENGTH` | `12` | 언제든 | 최소 암호 길이(8–99). 이미 정한 암호에는 적용되지 않습니다 |
-| `CODE2_AUTH_DOMAIN`, `CODE2_AUTH_CERT_ARN` | 없음 | 언제든 | Cognito 로그인 페이지 도메인(위 "내 도메인 쓰기"). 빈 값으로 지정하면 기본 도메인으로 돌아갑니다 |
-| `CODE2_DOMAIN`, `CODE2_ZONE`, `CODE2_ZONE_ID`, `CODE2_CERT_ARN` | 없음 | 생성 때만 | 내 도메인 |
 | `CODE2_AZ` | 인스턴스 타입을 제공하는 첫 AZ | 생성 때만 | 인스턴스와 `/home`의 AZ |
 | `CODE2_RESTORE_SNAPSHOT` | 없음 | 생성 때만 | 이 스냅샷으로 `/home`을 만듭니다(아래 "백업과 복구") |
 
@@ -296,7 +283,7 @@ sudo tail -n 50 /var/log/code2-setup.log # 부팅 설정 기록 (매 부팅)
 ### 주의
 
 - `InstanceType`을 같은 아키텍처 안에서 바꾸면 중지 후 시작으로 적용되고, 인스턴스는 교체되지 않습니다.
-- `/home` 볼륨은 줄일 수 없습니다. AZ, 네트워크, 도메인, 복구 스냅샷은 처음 만들 때 정하며, 바꾸려면 스택을 새로 만듭니다(스냅샷으로 `/home`을 옮길 수 있습니다).
+- `/home` 볼륨은 줄일 수 없습니다. AZ, 네트워크, 복구 스냅샷은 처음 만들 때 정하며, 바꾸려면 스택을 새로 만듭니다(스냅샷으로 `/home`을 옮길 수 있습니다).
 - 리전에 CloudFront VPC origin을 지원하지 않는 AZ가 있을 수 있습니다. 생성이 VPC origin에서 실패하면 `CODE2_AZ`로 다른 AZ를 지정합니다.
 - EC2 Instance Connect Endpoint는 계정·리전마다 개수 제한(기본 5개)이 있고, VPC당 하나입니다.
 - 버스터블 크레딧이 떨어지면 CPU가 vCPU당 20%(`t4g.large`는 30%)로 제한됩니다(standard 모드라 추가 요금은 없음). 빌드가 자주 느리면 `m7g.large`로, 메모리가 모자라면(확장을 많이 쓰거나 빌드가 크면 4 GiB로는 빠듯합니다) `t4g.large`로 바꾸는 것을 검토합니다.
@@ -332,13 +319,13 @@ code2/
 │   └── architecture.svg         구성도 원본 (아이콘 포함, 브라우저·Inkscape·draw.io에서 편집)
 └── infra/
     ├── code2.yaml               CloudFormation: VPC·NAT·EICE, Cognito, EC2·EBS, CloudFront VPC origin,
-    │                            CloudWatch 로그·알람, DLM 백업, (선택) Route 53
+    │                            CloudWatch 로그·알람, DLM 백업
     ├── setup.sh                 인스턴스 설정 스크립트: /home, code-server, remobi, oauth2-proxy, CloudWatch, 업데이트, 유휴 중지
     ├── deploy.sh                plan/apply(사전 점검·이관 포함), status, logs, reconfigure, ssh, shell, stop/start, destroy
     └── lint.sh                  cfn-lint, shellcheck (deploy.sh, setup.sh, user data), 템플릿 크기, 개인 정보 검사
 ```
 
-바꾼 뒤에는 `infra/lint.sh`로 검사합니다(`pip install cfn-lint`, `shellcheck` 필요). 공개 저장소라서 실제 계정 ID, 리소스 ID, 이메일, 도메인이 들어가면 실패합니다. 예시는 `example.com`과 `vpc-0123...` 같은 자리 표시자를 씁니다.
+바꾼 뒤에는 `infra/lint.sh`로 검사합니다(`pip install cfn-lint`, `shellcheck` 필요). 공개 저장소라서 실제 계정 ID, 리소스 ID, 이메일, 도메인 이름이 들어가면 실패합니다. 예시는 `example.com`과 `vpc-0123...` 같은 자리 표시자를 씁니다.
 
 ## 예상 비용 (서울, 월, 대략)
 
@@ -350,7 +337,7 @@ code2/
 | EBS gp3 30 + 50 GiB | 약 $7 |
 | `/home` 스냅샷 7개 (변경분만 저장) | 약 $1–3 |
 | CloudWatch 지표 3개, 로그, 알람 (알람은 지정 시) | 약 $1–2 |
-| CloudFront, Cognito(Essentials 무료 구간), EICE, Route 53 | 약 $1 미만 |
+| CloudFront, Cognito(Essentials 무료 구간), EICE | 약 $1 미만 |
 | **합계** | **약 $87–90** |
 
 - 인스턴스를 중지하면 EC2 요금(약 $30)은 나가지 않지만, NAT Gateway·IPv4·EBS 요금은 계속 나갑니다.

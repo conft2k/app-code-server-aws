@@ -17,7 +17,7 @@ Metadata:
       - Label: { default: Network (create-time) }
         Parameters: [AvailabilityZone, CloudFrontPrefixListId, VpcCidr, PublicSubnetCidr, PrivateSubnetCidr]
       - Label: { default: Edge }
-        Parameters: [DomainName, HostedZoneId, CertificateArn, AuthDomainName, AuthCertificateArn, PriceClass]
+        Parameters: [PriceClass]
 
 Parameters:
   AvailabilityZone:
@@ -42,29 +42,6 @@ Parameters:
     Type: String
     Default: 10.42.1.0/24
     Description: Instance and EC2 Instance Connect Endpoint subnet
-  DomainName:
-    Type: String
-    Default: ""
-    Description: Optional custom name (e.g. code.example.com). Leave empty to use the CloudFront domain.
-  HostedZoneId:
-    Type: String
-    Default: ""
-    Description: Route 53 public hosted zone of DomainName (only with DomainName)
-  CertificateArn:
-    Type: String
-    Default: ""
-    AllowedPattern: "^$|^arn:aws:acm:us-east-1:\\d{12}:certificate/.+$"
-    Description: ACM certificate in us-east-1 covering DomainName (only with DomainName)
-  AuthDomainName:
-    Type: String
-    Default: ""
-    Description: >-
-      Optional Cognito sign-in name under DomainName (e.g. auth.code.example.com); empty uses the prefix domain
-  AuthCertificateArn:
-    Type: String
-    Default: ""
-    AllowedPattern: "^$|^arn:aws:acm:us-east-1:\\d{12}:certificate/.+$"
-    Description: ACM certificate in us-east-1 covering AuthDomainName (only with AuthDomainName)
   PriceClass:
     Type: String
     Default: PriceClass_200
@@ -185,25 +162,7 @@ Parameters:
     AllowedPattern: "^[^@\\s]+@[^@\\s]+$"
     Description: Where the temporary password goes
 
-Rules:
-  CustomDomain:
-    RuleCondition: !Not [!Equals [!Ref DomainName, ""]]
-    Assertions:
-      - Assert: !Not [!Equals [!Ref HostedZoneId, ""]]
-        AssertDescription: DomainName needs HostedZoneId (its Route 53 public hosted zone)
-      - Assert: !Not [!Equals [!Ref CertificateArn, ""]]
-        AssertDescription: DomainName needs CertificateArn (an issued us-east-1 ACM certificate covering it)
-  AuthDomain:
-    RuleCondition: !Not [!Equals [!Ref AuthDomainName, ""]]
-    Assertions:
-      - Assert: !Not [!Equals [!Ref DomainName, ""]]
-        AssertDescription: AuthDomainName needs DomainName (its hosted zone and the parent name Cognito requires)
-      - Assert: !Not [!Equals [!Ref AuthCertificateArn, ""]]
-        AssertDescription: AuthDomainName needs AuthCertificateArn (an issued us-east-1 ACM certificate covering it)
-
 Conditions:
-  HasDomain: !Not [!Equals [!Ref DomainName, ""]]
-  HasAuthDomain: !Not [!Equals [!Ref AuthDomainName, ""]]
   HasAz: !Not [!Equals [!Ref AvailabilityZone, ""]]
   MfaOn: !Equals [!Ref Mfa, "on"]
   HasSnapshot: !Not [!Equals [!Ref DataSnapshotId, ""]]
@@ -381,13 +340,13 @@ Resources:
         AllowAdminCreateUserOnly: true
         InviteMessageTemplate:
           EmailSubject: "[code2] VS Code 계정이 만들어졌습니다"
-          # Without a custom domain the URL is known only after the distribution exists.
+          # The URL is known only after the distribution exists, so the mail points at `deploy.sh status`.
           EmailMessage: !Sub
             - >-
               code2 (VS Code) 계정입니다.<br><br>
               사용자 이름: {username}<br>임시 암호: {####}<br><br>
               ${Where}에 접속해 위 정보로 로그인한 뒤 ${Setup} 임시 암호는 7일 동안 쓸 수 있습니다.
-            - Where: !If [HasDomain, !Sub "https://${DomainName} ", "code2 주소(infra/deploy.sh status 의 url)"]
+            - Where: "code2 주소(infra/deploy.sh status 의 url)"
               Setup: !If [MfaOn, "새 암호와 인증 앱(TOTP)을 등록해 주세요.", "새 암호를 정해 주세요."]
       Policies:
         PasswordPolicy:
@@ -416,11 +375,11 @@ Resources:
       CallbackURLs:
         - !Sub
           - "https://${Host}/oauth2/callback"
-          - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+          - Host: !GetAtt Distribution.DomainName
       LogoutURLs:
         - !Sub
           - "https://${Host}/"
-          - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+          - Host: !GetAtt Distribution.DomainName
       ExplicitAuthFlows: [ALLOW_REFRESH_TOKEN_AUTH]
       PreventUserExistenceErrors: ENABLED
       EnableTokenRevocation: true
@@ -429,38 +388,12 @@ Resources:
       RefreshTokenValidity: !Ref SessionHours
       TokenValidityUnits: { IdToken: minutes, AccessToken: minutes, RefreshToken: hours }
 
-  # A custom domain needs its parent name (DnsA) to resolve.
-  ParentDnsReady:
-    Type: AWS::CloudFormation::WaitConditionHandle
-    Metadata:
-      Record: !If [HasDomain, !Ref DnsA, ""]
-
   UserPoolDomain:
     Type: AWS::Cognito::UserPoolDomain
-    DependsOn: ParentDnsReady
     Properties:
       UserPoolId: !Ref UserPool
-      Domain: !If [HasAuthDomain, !Ref AuthDomainName, !Sub "${AWS::StackName}-${AWS::AccountId}"]
-      CustomDomainConfig: !If [HasAuthDomain, { CertificateArn: !Ref AuthCertificateArn }, !Ref "AWS::NoValue"]
+      Domain: !Sub "${AWS::StackName}-${AWS::AccountId}"
       ManagedLoginVersion: 2
-
-  AuthDnsA:
-    Type: AWS::Route53::RecordSet
-    Condition: HasAuthDomain
-    Properties:
-      HostedZoneId: !Ref HostedZoneId
-      Name: !Ref AuthDomainName
-      Type: A
-      AliasTarget: { DNSName: !GetAtt UserPoolDomain.CloudFrontDistribution, HostedZoneId: Z2FDTNDATAQYW2 }
-
-  AuthDnsAAAA:
-    Type: AWS::Route53::RecordSet
-    Condition: HasAuthDomain
-    Properties:
-      HostedZoneId: !Ref HostedZoneId
-      Name: !Ref AuthDomainName
-      Type: AAAA
-      AliasTarget: { DNSName: !GetAtt UserPoolDomain.CloudFrontDistribution, HostedZoneId: Z2FDTNDATAQYW2 }
 
   ManagedLoginBranding:
     Type: AWS::Cognito::ManagedLoginBranding
@@ -490,7 +423,7 @@ Resources:
       Description: code2 oauth2-proxy client id and public URL, read by the instance at boot
       Value: !Sub
         - '{"clientId":"${UserPoolClient}","url":"https://${Host}"}'
-        - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+        - Host: !GetAtt Distribution.DomainName
 
   # Everything setup.sh needs besides the stack name and region. A change is applied by deploy.sh reconfigure.
   SetupConfig:
@@ -505,11 +438,8 @@ Resources:
           "remobi_version":"${RemobiVersion}","auto_updates":"${AutoUpdates}","ai_tools":"${AiTools}","idle_hours":"${IdleStopHours}",
           "session_hours":"${SessionHours}","vol":"${DataVolume}","user_pool":"${UserPool}",
           "cognito_host":"${CognitoHost}","log_group":"${LogGroup}"}
-        # Not from UserPoolDomain (it waits for DnsA, which waits for the instance).
-        - CognitoHost: !If
-            - HasAuthDomain
-            - !Ref AuthDomainName
-            - !Sub "${AWS::StackName}-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com"
+        # Not from UserPoolDomain (it would make the instance wait for the domain).
+        - CognitoHost: !Sub "${AWS::StackName}-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com"
 
   # --- compute ---
   InstanceRole:
@@ -796,14 +726,10 @@ Resources:
       DistributionConfig:
         Enabled: true
         Comment: !Sub "${AWS::StackName} VS Code server"
-        Aliases: !If [HasDomain, [!Ref DomainName], !Ref "AWS::NoValue"]
         HttpVersion: http2and3
         IPV6Enabled: true
         PriceClass: !Ref PriceClass
-        ViewerCertificate: !If
-          - HasDomain
-          - { AcmCertificateArn: !Ref CertificateArn, SslSupportMethod: sni-only, MinimumProtocolVersion: TLSv1.2_2021 }
-          - { CloudFrontDefaultCertificate: true }
+        ViewerCertificate: { CloudFrontDefaultCertificate: true }
         Origins:
           - Id: code2-ec2
             DomainName: !GetAtt Instance.PrivateDnsName
@@ -820,35 +746,17 @@ Resources:
           CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad        # Managed-CachingDisabled
           OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # Managed-AllViewer
 
-  DnsA:
-    Type: AWS::Route53::RecordSet
-    Condition: HasDomain
-    Properties:
-      HostedZoneId: !Ref HostedZoneId
-      Name: !Ref DomainName
-      Type: A
-      AliasTarget: { DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FDTNDATAQYW2 }
-
-  DnsAAAA:
-    Type: AWS::Route53::RecordSet
-    Condition: HasDomain
-    Properties:
-      HostedZoneId: !Ref HostedZoneId
-      Name: !Ref DomainName
-      Type: AAAA
-      AliasTarget: { DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FDTNDATAQYW2 }
-
 Outputs:
   Url:
     Value: !Sub
       - "https://${Host}"
-      - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+      - Host: !GetAtt Distribution.DomainName
   # Ends the oauth2-proxy session, then Cognito's, and returns to sign-in.
   LogoutUrl:
     Value: !Sub
       - "https://${Host}/oauth2/sign_out?rd=https%3A%2F%2F${AuthHost}%2Flogout%3Fclient_id%3D${UserPoolClient}%26logout_uri%3Dhttps%253A%252F%252F${Host}%252F"
-      - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
-        AuthHost: !If [HasAuthDomain, !Ref AuthDomainName, !Sub "${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"]
+      - Host: !GetAtt Distribution.DomainName
+        AuthHost: !Sub "${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
   InstanceId:
     Value: !Ref Instance
   InstancePrivateIp:
