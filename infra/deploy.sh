@@ -257,8 +257,9 @@ legacy_template() {
 # an earlier template (a separate sign-in name with an email alias) cannot be updated to it in place.
 check_email_signin() {
   local pool attrs
-  pool=$(physical_id UserPool)
-  [ -n "$pool" ] && [ "$pool" != None ] || return 0
+  pool=$(aws cloudformation describe-stack-resource --stack-name "$STACK" --logical-resource-id UserPool \
+    --query StackResourceDetail.PhysicalResourceId --output text) || die "cannot read the UserPool resource of $STACK"
+  [ -n "$pool" ] && [ "$pool" != None ] || die "$STACK has no UserPool resource; cannot check its sign-in mode"
   attrs=$(aws cognito-idp describe-user-pool --user-pool-id "$pool" --query 'UserPool.UsernameAttributes' --output text) \
     || die "cannot read user pool $pool"
   [[ "$attrs" == *email* ]] || die "$STACK was created by an older template whose user pool signs in with a user name, not \
