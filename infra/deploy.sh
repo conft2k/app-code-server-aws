@@ -32,16 +32,20 @@ Settings (environment). Unset ones keep their current value on update; create-ti
   CODE2_MFA                    on|off TOTP at sign-in (default on)
   CODE2_PASSWORD_MIN_LENGTH    minimum password length, 8-99 (default 12)
   CODE2_AUTO_UPDATES           true|false daily security updates (default true)
-  CODE2_AI_TOOLS               on|off install Claude Code and Codex for ec2-user (default off; off keeps installed ones)
+  CODE2_AI_TOOLS               on|off install Claude Code and Codex for ec2-user (default on; off keeps installed ones)
   CODE2_IDLE_STOP_HOURS        stop after this many idle hours (default 0 = never)
   CODE2_BACKUP_COUNT           daily /home snapshots kept (default 7, 0 = off)
   CODE2_ALARM_EMAIL            CloudWatch alarm mails (default none)
+  CODE2_YES=1                  destroy: skip the confirmation; stack plan: ask nothing
   CODE2_PRICE_CLASS            PriceClass_100|200|All (default PriceClass_200)
   CODE2_UPDATE_AMI=1           move to the latest AL2023 AMI (replaces the instance; /home stays)
   CODE2_KEEP_ON_FAILURE=1      apply without rollback, to inspect a failed create
   create-time:
   CODE2_AZ                     AZ (default: the first one offering the instance type)
   CODE2_RESTORE_SNAPSHOT       snap-... to create /home from (a snapshot of an earlier code2 /home)
+
+In a terminal, stack plan asks for the region and stack name, and for a new stack the main settings, unless they
+are exported. Without a terminal, or with CODE2_YES=1, it asks nothing and uses the environment.
 EOF
   exit 2
 }
@@ -51,23 +55,37 @@ warn() { echo "warning: $*" >&2; }
 
 case "${1:-}" in ""|-h|--help|help) usage ;; esac
 command -v jq >/dev/null || die "jq is required"
-command -v aws >/dev/null || die "AWS CLI v2 is required"
-aws --version 2>&1 | grep -q '^aws-cli/2' || die "AWS CLI v2 is required (found: $(aws --version 2>&1))"
+CLI_HELP="install AWS CLI v2 (https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), then sign in (aws configure, aws login or aws sso login) and check with: aws sts get-caller-identity"
+command -v aws >/dev/null || die "AWS CLI v2 is required: $CLI_HELP"
+aws --version 2>&1 | grep -q '^aws-cli/2' || die "AWS CLI v2 is required (found: $(aws --version 2>&1)): $CLI_HELP"
 
+TMP_STS=$(mktemp); trap 'rm -f "$TMP_STS"' EXIT
+# plan asks for what is not set here (ask_basics), so remember what the environment gave.
+region_given=0 stack_given=0
+if [ -n "${AWS_REGION+x}${AWS_DEFAULT_REGION+x}" ]; then region_given=1; fi
+if [ -n "${CODE2_STACK+x}" ]; then stack_given=1; fi
 region=${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || true)}}
 export AWS_REGION=${region:-ap-northeast-2}
 STACK=${CODE2_STACK:-code2}
 TEMPLATE=$(cd "$(dirname "$0")" && pwd)/code2.yaml
 SETUP=$(dirname "$TEMPLATE")/setup.sh
 
-caller=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo none)
-[ "$caller" != none ] || die "no AWS credentials: sign in first (aws login, aws sso login, or AWS_PROFILE=...)"
+# A region the user has not given may be a typo in the profile (plan asks for it later), so STS is tried in us-east-1
+# too: any region's endpoint returns the same account.
+caller=$(aws sts get-caller-identity --query Account --output text 2>"$TMP_STS" || echo none)
+if [ "$caller" = none ] && [ "$region_given" = 0 ]; then
+  caller=$(aws sts get-caller-identity --region us-east-1 --query Account --output text 2>"$TMP_STS" || echo none)
+fi
+if [ "$caller" = none ]; then
+  sed 's/^/  /' "$TMP_STS" >&2
+  die "no usable AWS credentials: sign in first (aws configure, aws login, aws sso login, or AWS_PROFILE=...) and check with: aws sts get-caller-identity"
+fi
 if [ -n "${CODE2_ACCOUNT:-}" ] && [ "$caller" != "$CODE2_ACCOUNT" ]; then
   die "refusing to run: credentials are for account $caller, CODE2_ACCOUNT is $CODE2_ACCOUNT"
 fi
 
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" "$TMP_STS"' EXIT
 
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 is_set() { declare -p "$1" >/dev/null 2>&1; }
@@ -147,12 +165,14 @@ arch_of() { aws ec2 describe-instance-types --instance-types "$1" --query 'Insta
   --output text 2>/dev/null | tr '\t' '\n' | grep -E '^(arm64|x86_64)$' | head -1 || true; }
 # The instance finds /home by its NVMe serial, which only Nitro (and bare metal) types expose; Xen types (t2, m4, c4)
 # would wait for the volume and fail.
-check_nitro() {
+nitro_problem() {
   local hv metal
   read -r hv metal < <(aws ec2 describe-instance-types --instance-types "$1" \
     --query 'InstanceTypes[0].[Hypervisor,BareMetal]' --output text 2>/dev/null || echo "none False")
-  [ "$hv" = nitro ] || [ "$metal" = True ] || die "$1 is not a Nitro instance type (hypervisor $hv); code2 needs one, e.g. t4g, t3, m7g, m7i"
+  [ "$hv" = nitro ] || [ "$metal" = True ] || {
+    echo "$1 is not a Nitro instance type (hypervisor $hv); code2 needs one, e.g. t4g, t3, m7g, m7i"; return 1; }
 }
+check_nitro() { local r; r=$(nitro_problem "$1") || die "$r"; }
 latest_ami() { aws ssm get-parameter --name "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-$1" \
   --query Parameter.Value --output text; }
 
@@ -165,11 +185,120 @@ prefix_list() {
   echo "$id"
 }
 
+# ---------- interactive plan (a terminal only; exported values are never asked) ----------
+# name@domain.tld: dot-separated parts, no leading/trailing/double dots, a letter TLD (rejects you@example, <you@example.com>).
+EMAIL_ATOM="[A-Za-z0-9!#\$%&'*+/=?^_\`{|}~-]+"   # RFC 5322 atext
+EMAIL_RE="^$EMAIL_ATOM(\\.$EMAIL_ATOM)*@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*\\.[A-Za-z]{2,}\$"
+interactive() { [ -t 0 ] && [ "${CODE2_YES:-}" != 1 ]; }
+
+# stack_name_problem <name>: prints why the name is unusable (shared by the prompt and preflight_create).
+stack_name_problem() {
+  [[ "$1" =~ ^[a-z]([a-z0-9-]*[a-z0-9])?$ ]] \
+    || { echo "must start with a letter and use only lowercase letters, digits and hyphens (not at the end)"; return 1; }
+  [ ${#1} -le 50 ] || { echo "is longer than 50 characters (it prefixes the Cognito domain)"; return 1; }
+  if [[ "$1" =~ aws|amazon|cognito ]]; then echo "cannot contain aws, amazon or cognito (Cognito domain rule)"; return 1; fi
+  return 0
+}
+# Checks for ask: print the reason and return 1 when the answer is not usable.
+chk_region() {
+  local r
+  # Asked in the region itself: AWS_REGION may still be the profile's unusable value.
+  r=$(aws ec2 describe-regions --region "$1" --region-names "$1" --filters Name=opt-in-status,Values=opt-in-not-required,opted-in \
+    --query 'Regions[0].RegionName' --output text 2>/dev/null || true)
+  [ "$r" = "$1" ] || { echo "$1 is not a region enabled for this account; enter a region code like ap-northeast-2"; return 1; }
+}
+chk_stack() { local r; r=$(stack_name_problem "$1") || { echo "stack name $r"; return 1; }; }
+chk_email() { [[ "$1" =~ $EMAIL_RE ]] || { echo "enter an email address like you@example.com"; return 1; }; }
+chk_email_or_empty() {
+  case "$1" in n|no|none|-) echo "leave it empty (press Enter) for no alarm email"; return 1 ;; esac
+  [ -z "$1" ] || chk_email "$1"
+}
+chk_onoff() { [ "$1" = on ] || [ "$1" = off ] || { echo "answer on or off"; return 1; }; }
+chk_type() {
+  local arch r
+  arch=$(arch_of "$1"); [ -n "$arch" ] || { echo "unknown instance type $1 in $AWS_REGION"; return 1; }
+  r=$(nitro_problem "$1") || { echo "$r"; return 1; }
+}
+chk_data() { { [[ "$1" =~ ^[0-9]{1,6}$ ]] && [ "$1" -ge 20 ]; } || { echo "enter a whole number of GiB, 20 or more"; return 1; }; }
+chk_idle() { { [[ "$1" =~ ^[0-9]{1,3}$ ]] && [ "$1" -le 72 ]; } || { echo "enter whole hours from 0 to 72"; return 1; }; }
+
+# ask <VAR> <prompt> <default> <check>: asks until the check passes (Enter takes the default), then exports VAR.
+ask() {
+  local var=$1 prompt=$2 def=$3 check=$4 ans err
+  while :; do
+    read -rp "$prompt " ans || die "stopped; nothing was changed"
+    ans=${ans:-$def}
+    case "$var" in AWS_REGION|CODE2_MFA|CODE2_AI_TOOLS|CODE2_INSTANCE_TYPE) ans=$(printf %s "$ans" | tr '[:upper:]' '[:lower:]') ;; esac
+    if err=$("$check" "$ans"); then break; fi
+    echo "  $err" >&2
+  done
+  export "$var=$ans"
+}
+
+# Region and stack name; returns 1 when the stack exists (an update asks nothing more).
+ask_basics() {
+  local def
+  echo "Press Enter to take the [default]; Ctrl-D stops without changing anything." >&2
+  if [ "$region_given" = 0 ]; then
+    def=$(aws configure get region 2>/dev/null || true); def=${def:-ap-northeast-2}
+    ask AWS_REGION "Region [$def]:" "$def" chk_region
+    BUCKET="code2-setup-$caller-$AWS_REGION"
+  fi
+  if [ "$stack_given" = 0 ]; then
+    ask CODE2_STACK "Stack name [code2]:" code2 chk_stack
+    STACK=$CODE2_STACK
+  fi
+  check_state
+  case "$(stack_status)" in
+    NONE|REVIEW_IN_PROGRESS|DELETE_COMPLETE) echo "$STACK does not exist in $AWS_REGION; it will be created." >&2 ;;
+    *) echo "$STACK exists in $AWS_REGION; plan keeps its current settings for anything not exported." >&2; return 1 ;;
+  esac
+}
+
+# The create-time settings, then the command to repeat them and the go-ahead. Runs before any AWS write.
+ask_create() {
+  local line v ans
+  is_set CODE2_ADMIN_EMAIL || ask CODE2_ADMIN_EMAIL "Sign-in email (the temporary password goes here):" "" chk_email
+  is_set CODE2_MFA || ask CODE2_MFA "Multi-factor authentication: ask for an authenticator app code at sign-in (on/off) [on]:" on chk_onoff
+  is_set CODE2_INSTANCE_TYPE || ask CODE2_INSTANCE_TYPE "Instance type [t4g.medium]:" t4g.medium chk_type
+  is_set CODE2_DATA_SIZE || ask CODE2_DATA_SIZE "/home size in GiB, can only grow [50]:" 50 chk_data
+  is_set CODE2_IDLE_STOP_HOURS || ask CODE2_IDLE_STOP_HOURS "Stop after idle hours, 0 = never [0]:" 0 chk_idle
+  is_set CODE2_AI_TOOLS || ask CODE2_AI_TOOLS "Install Claude Code and Codex (on/off) [on]:" on chk_onoff
+  is_set CODE2_ALARM_EMAIL || ask CODE2_ALARM_EMAIL "Alarm email, empty = none []:" "" chk_email_or_empty
+  # Every create setting in effect, asked or exported, so the line repeats this plan without questions.
+  line="AWS_REGION=$(printf %q "$AWS_REGION") CODE2_STACK=$(printf %q "$STACK")"
+  for v in $(for pair in $TUNABLES; do echo "${pair#*:}"; done) CODE2_AZ CODE2_RESTORE_SNAPSHOT; do
+    if is_set "$v"; then line="$line $v=$(printf %q "${!v}")"; fi
+  done
+  local idle=never alarm=none
+  [ "${CODE2_IDLE_STOP_HOURS:-0}" = 0 ] || idle="after ${CODE2_IDLE_STOP_HOURS} idle hours"
+  [ -z "${CODE2_ALARM_EMAIL:-}" ] || alarm=$CODE2_ALARM_EMAIL
+  {
+    echo
+    echo "New stack $STACK in $AWS_REGION, account $caller:"
+    echo "  sign-in email       $CODE2_ADMIN_EMAIL (the temporary password goes here; check it)"
+    echo "  MFA                 ${CODE2_MFA:-on}"
+    echo "  instance type       ${CODE2_INSTANCE_TYPE:-t4g.medium}"
+    echo "  /home               ${CODE2_DATA_SIZE:-50} GiB"
+    echo "  stop                $idle"
+    echo "  Claude Code, Codex  ${CODE2_AI_TOOLS:-on}"
+    echo "  alarm email         $alarm"
+    echo "Nothing is built yet: plan only makes a change set. infra/deploy.sh stack apply builds it (about 15-20 minutes)."
+    printf 'To run the same again without questions:\n  export %s\n' "$line"
+  } >&2
+  while :; do
+    read -rp "Continue with these settings? [Y/n] " ans || ans=n
+    case "$ans" in
+      ""|[Yy]|[Yy][Ee][Ss]) break ;;
+      [Nn]|[Nn][Oo]) die "stopped; nothing was changed" ;;
+      *) echo "  answer y or n" >&2 ;;
+    esac
+  done
+}
+
 preflight_create() {
-  local type=$1 az=$2 n
-  [[ "$STACK" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || die "CODE2_STACK must be lowercase letters, digits and hyphens"
-  [ ${#STACK} -le 50 ] || die "CODE2_STACK is longer than 50 characters (it prefixes the Cognito domain)"
-  [[ "$STACK" =~ aws|amazon|cognito ]] && die "CODE2_STACK cannot contain aws, amazon or cognito (Cognito domain rule)"
+  local type=$1 az=$2 n r
+  r=$(stack_name_problem "$STACK") || die "CODE2_STACK $r"
   aws ec2 describe-instance-type-offerings --location-type availability-zone \
     --filters "Name=location,Values=$az" "Name=instance-type,Values=$type" --query 'InstanceTypeOfferings[0]' \
     --output text | grep -q "$type" || die "$type is not offered in $az (set CODE2_AZ or CODE2_INSTANCE_TYPE)"
@@ -299,7 +428,8 @@ recreates_instance() {
 }
 
 plan() {
-  local type template kind cs
+  local type template kind cs ask_more=0
+  if interactive; then ask_basics || ask_more=1; fi   # 1: the stack exists, nothing more to ask
   check_state
   case "$(stack_status)" in NONE|REVIEW_IN_PROGRESS|DELETE_COMPLETE) type=CREATE ;; *) type=UPDATE ;; esac
   template=$TEMPLATE kind=main
@@ -321,6 +451,7 @@ plan() {
   elif [ "$type" = UPDATE ]; then
     params_update
   else
+    if interactive && [ "$ask_more" = 0 ]; then ask_create; fi
     params_create
   fi
 

@@ -15,20 +15,40 @@ CloudFront → private EC2(Graviton) → code-server · Cognito 로그인(기본
 
 ## 빠른 시작
 
-필요한 것: AWS 계정, AWS CLI v2, `jq`, 관리자 수준 자격 증명(VPC, EC2, IAM, CloudFront, Cognito, SSM, CloudWatch, DLM을 만듭니다). SSH와 Session Manager를 쓰려면 [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)도 설치합니다.
+필요한 것: AWS 계정, `jq`, 관리자 수준 자격 증명(VPC, EC2, IAM, CloudFront, Cognito, SSM, CloudWatch, DLM을 만듭니다). SSH와 Session Manager를 쓰려면 [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)도 설치합니다.
+
+`deploy.sh`는 AWS CLI로 동작하므로, 실행하기 전에 AWS CLI를 설치하고 로그인까지 끝내 둡니다.
+
+1. [AWS CLI v2를 설치](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)합니다.
+2. 자격 증명을 설정합니다: `aws configure`(액세스 키), `aws login`(콘솔 로그인), `aws sso login`(IAM Identity Center) 중 하나. 프로필을 여러 개 쓰면 `export AWS_PROFILE=<프로필>`로 고릅니다.
+3. `aws sts get-caller-identity`가 배포할 계정 ID를 보여 주는지 확인합니다.
+
+AWS CLI가 없거나 자격 증명이 통하지 않으면 `deploy.sh`는 아무것도 묻거나 만들지 않고, 위 순서를 안내한 뒤 멈춥니다.
 
 ```bash
 git clone https://github.com/conft2k/app-code-server-aws.git && cd app-code-server-aws
 
+infra/deploy.sh stack plan     # 설정을 물어본 뒤, 사전 점검하고 변경 세트만 만들어 내용을 보여 줍니다
+infra/deploy.sh stack apply    # 실행 (약 15–20분, 서버 설정이 끝날 때까지 기다립니다)
+infra/deploy.sh status         # URL 확인, 서비스가 active active 이면 준비 완료
+```
+
+터미널에서 `stack plan`을 실행하면 `export` 없이도 필요한 설정을 차례로 물어봅니다. 기본값은 Enter로 받습니다.
+
+- 리전(기본: AWS CLI 프로필의 리전, 없으면 `ap-northeast-2`)과 스택 이름(기본 `code2`)을 먼저 묻습니다. 그 스택이 이미 있으면 "있다"고 알리고 더 묻지 않으며, 지정하지 않은 설정은 현재 값을 유지합니다.
+- 새 스택이면 이어서 로그인 메일(필수), MFA(`on`), 인스턴스 타입(`t4g.medium`), `/home` 크기(50 GiB), 유휴 자동 중지 시간(0 = 안 함), Claude Code·Codex 설치(`on`), 알림 메일(없음)을 묻습니다. 틀린 값은 이유를 알려 주고 다시 묻습니다.
+- 마지막에 같은 설정을 다시 쓸 `export` 줄을 보여 주고 `Continue with these settings? [Y/n]`로 확인합니다. `n`이면 AWS에 아무것도 만들지 않고 멈춥니다.
+- 이미 `export`한 값은 묻지 않습니다. 터미널이 아닐 때(스크립트, CI)나 `CODE2_YES=1`일 때는 아무것도 묻지 않고 환경 변수만 씁니다. 이때 새 스택에는 `CODE2_ADMIN_EMAIL`이 꼭 필요합니다.
+
+묻지 않고 실행하려면 환경 변수로 미리 정합니다.
+
+```bash
 export AWS_REGION=ap-northeast-2              # 원하는 리전
 export CODE2_ADMIN_EMAIL=you@example.com      # 로그인 메일 (임시 암호도 이 주소로 옵니다)
 # export CODE2_MFA=off                        # 선택: TOTP 없이 암호만 (기본 on)
-# export CODE2_AI_TOOLS=on                    # 선택: Claude Code, Codex 설치 (기본 off)
+# export CODE2_AI_TOOLS=off                   # 선택: Claude Code, Codex 설치 안 함 (기본 on)
 # export CODE2_ALARM_EMAIL=you@example.com    # 선택: 장애 알림 메일 (아래 "모니터링")
-
-infra/deploy.sh stack plan     # 사전 점검 후 변경 세트만 만들고 내용을 보여 줍니다
-infra/deploy.sh stack apply    # 실행 (약 15–20분, 서버 설정이 끝날 때까지 기다립니다)
-infra/deploy.sh status         # URL 확인, 서비스가 active active 이면 준비 완료
+infra/deploy.sh stack plan </dev/null
 ```
 
 1. `CODE2_ADMIN_EMAIL`로 임시 암호가 옵니다(7일 유효).
@@ -108,7 +128,7 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active 이면 �
 
 `git`, `python3` (+ `pip`), `gcc`, `gcc-c++`, `make`, `tmux`, `jq`, AWS CLI v2, Node.js 22(`nodejs22`, `node`·`npm`). setup.sh는 `npm-22`를 직접 부르므로 다른 Node.js 버전을 기본으로 바꿔도 됩니다. **Docker는 설치되어 있지 않습니다.**
 
-AI 코딩 도구(Claude Code, Codex)는 `CODE2_AI_TOOLS=on`일 때만 `ec2-user`의 `/home`에 설치합니다(기본 `off`: 설치하지 않습니다). `off`로 되돌려도 이미 설치한 도구는 지우지 않습니다. 켜면 setup.sh는 CLI가 없거나 실행되지 않을 때(`--version` 실패, 예: 설치가 덜 됐거나 인스턴스 타입을 바꿔 아키텍처가 달라졌을 때)만 그 CLI를 지우고 다시 설치합니다. 버전은 Claude Code는 설정한 업데이트 채널(기본 `latest`)의 최신 버전, Codex는 npm의 최신 버전입니다. 설정(`~/.claude`, `~/.codex`)은 그대로 둡니다. 확장은 없을 때만 설치합니다. 실행되는 도구는 건드리지 않으므로, 인스턴스를 교체해도 쓰던 버전과 설정이 남고 업데이트는 각 도구가 합니다. 이 설치는 서비스가 모두 뜨고 스택에 성공을 알린 뒤 맨 마지막에, 모두 합쳐 최대 15분 동안 합니다. 설치에 실패하거나 시간이 모자라면 경고만 남기고, 다음 setup 실행(재부팅, `reconfigure`) 때 다시 설치합니다. 로그인과 모델 설정(예: Bedrock)은 직접 합니다.
+AI 코딩 도구(Claude Code, Codex)는 `CODE2_AI_TOOLS`가 `on`(기본)일 때 `ec2-user`의 `/home`에 설치합니다(`off`면 설치하지 않습니다). `off`로 바꿔도 이미 설치한 도구는 지우지 않습니다. 켜면 setup.sh는 CLI가 없거나 실행되지 않을 때(`--version` 실패, 예: 설치가 덜 됐거나 인스턴스 타입을 바꿔 아키텍처가 달라졌을 때)만 그 CLI를 지우고 다시 설치합니다. 버전은 Claude Code는 설정한 업데이트 채널(기본 `latest`)의 최신 버전, Codex는 npm의 최신 버전입니다. 설정(`~/.claude`, `~/.codex`)은 그대로 둡니다. 확장은 없을 때만 설치합니다. 실행되는 도구는 건드리지 않으므로, 인스턴스를 교체해도 쓰던 버전과 설정이 남고 업데이트는 각 도구가 합니다. 이 설치는 서비스가 모두 뜨고 스택에 성공을 알린 뒤 맨 마지막에, 모두 합쳐 최대 15분 동안 합니다. 설치에 실패하거나 시간이 모자라면 경고만 남기고, 다음 setup 실행(재부팅, `reconfigure`) 때 다시 설치합니다. 로그인과 모델 설정(예: Bedrock)은 직접 합니다.
 
 아키텍처가 다른 인스턴스 타입(예: `t4g` ↔ `t3`)으로 바꾸면 확장은 자동으로 다시 설치되지 않습니다. 새 인스턴스에서 `code-server --uninstall-extension anthropic.claude-code`, `code-server --uninstall-extension openai.chatgpt`로 지운 뒤 `reconfigure`를 실행하면, 그 아키텍처용으로 다시 설치합니다.
 
@@ -159,7 +179,7 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 | 변수 | 기본값 | 언제 바꿀 수 있나 | 설명 |
 |---|---|---|---|
 | `CODE2_ADMIN_EMAIL` | (필수, 첫 배포) | 언제든 | 로그인 메일이자 임시 암호를 받을 주소(템플릿 파라미터 `AdminEmail`). 바꾸면 사용자를 새로 만듭니다(아래 "계정") |
-| `CODE2_STACK` | `code2` | – | 스택 이름(소문자·숫자·하이픈, 50자 이하, `aws`/`amazon`/`cognito` 포함 불가: Cognito 도메인 접두사로 쓰입니다). 이름을 달리하면 한 계정에 여러 대를 만들 수 있습니다 |
+| `CODE2_STACK` | `code2` | – | 스택 이름(영문 소문자로 시작, 소문자·숫자·하이픈, 하이픈으로 끝나지 않음, 50자 이하, `aws`/`amazon`/`cognito` 포함 불가: Cognito 도메인 접두사로 쓰입니다). 이름을 달리하면 한 계정에 여러 대를 만들 수 있습니다 |
 | `CODE2_ACCOUNT` | 없음 | – | 지정하면 다른 계정의 자격 증명으로는 실행하지 않습니다 |
 | `AWS_REGION` | `AWS_DEFAULT_REGION` → 프로필 리전 → `ap-northeast-2` | – | 배포 리전 |
 | `CODE2_INSTANCE_TYPE` | `t4g.medium` | 언제든 | 같은 아키텍처면 중지 후 시작, 아키텍처가 다르면 인스턴스 교체 |
@@ -169,10 +189,11 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 | `CODE2_SESSION_HOURS` | `12` | 언제든 | 로그인 유지 시간(1–168) |
 | `CODE2_MFA` | `on` | 언제든 | `on`: 첫 로그인 때 TOTP를 등록하고 매번 코드를 입력합니다. `off`: 암호만. 나중에 `on`으로 바꾸면 사용자는 다음 로그인 때 TOTP를 등록합니다. Cognito의 OPTIONAL은 관리형 로그인이 TOTP 등록 화면을 띄우지 않아 넣지 않았습니다 |
 | `CODE2_AUTO_UPDATES` | `true` | 언제든 | 매일 보안 업데이트 |
-| `CODE2_AI_TOOLS` | `off` | 언제든 | `on`: Claude Code, Codex CLI와 code-server 확장을 `ec2-user`의 `/home`에 설치합니다(위 "기본 설치 도구"). 적용하면 `reconfigure`가 바로 설치하고, `off`로 바꿔도 설치된 도구는 지우지 않습니다 |
+| `CODE2_AI_TOOLS` | `on` | 언제든 | `on`: Claude Code, Codex CLI와 code-server 확장을 `ec2-user`의 `/home`에 설치합니다(위 "기본 설치 도구"). 기존 스택은 이전 값을 유지합니다. 적용하면 `reconfigure`가 바로 설치하고, `off`로 바꿔도 설치된 도구는 지우지 않습니다 |
 | `CODE2_IDLE_STOP_HOURS` | `0` (끔) | 언제든 | 유휴 상태가 이 시간만큼 이어지면 인스턴스 중지(아래 "유휴 중지") |
 | `CODE2_BACKUP_COUNT` | `7` | 언제든 | 보관할 일일 `/home` 스냅샷 수. `0`이면 백업 끔 |
 | `CODE2_ALARM_EMAIL` | 없음 | 언제든 | CloudWatch 알람 메일. 빈 값으로 지정하면 알람을 지웁니다 |
+| `CODE2_YES` | – | – | `1`이면 `stack plan`이 터미널에서도 아무것도 묻지 않고 환경 변수만 씁니다. `destroy`는 스택 이름 확인을 건너뜁니다 |
 | `CODE2_PRICE_CLASS` | `PriceClass_200` | 언제든 | CloudFront 가격 등급 |
 | `CODE2_UPDATE_AMI=1` | – | 업데이트 때 | 최신 AL2023 AMI로 인스턴스를 교체합니다 |
 | `CODE2_KEEP_ON_FAILURE=1` | – | apply 때 | 실패해도 롤백하지 않습니다(원인 조사용) |

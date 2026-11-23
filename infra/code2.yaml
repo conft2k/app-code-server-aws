@@ -89,7 +89,7 @@ Parameters:
     Description: Daily security updates with dnf-automatic, following the latest AL2023 release (no automatic reboot)
   AiTools:
     Type: String
-    Default: "off"
+    Default: "on"
     AllowedValues: ["on", "off"]
     Description: >-
       on: install Claude Code, Codex and their code-server extensions for ec2-user in /home (at the end of the next
