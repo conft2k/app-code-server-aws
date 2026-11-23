@@ -1,0 +1,461 @@
+#!/bin/bash
+# code2 host: /home on its own volume, code-server behind oauth2-proxy (Cognito).
+# Run as root by the user data bootstrap (every boot) and by deploy.sh reconfigure; idempotent. Settings come from
+# the stack's SSM parameter /<stack>/setup, so changing them never touches the instance's user data.
+set -Eeuo pipefail
+exec > >(tee -a /var/log/code2-setup.log) 2>&1
+umask 022
+# One run at a time: deploy.sh may start one while the boot run is still going; it waits, then runs again.
+exec 9>/run/code2-setup.lock
+flock 9
+stack=${CODE2_STACK:?} region=${AWS_REGION:?} wait_handle=${CODE2_WAIT_HANDLE:-}
+log() { echo "code2-setup: $(date -u +%FT%TZ) $*"; }
+retry() { local n; for n in 1 2 3 4; do "$@" && return 0; log "retry $n: $1" >&2; sleep $((n * 10)); done; "$@"; }
+
+# First-boot result for BootWait, sent once per instance: CloudFormation ignores later signals and the
+# handle's presigned URL expires, so later runs would only log a 403.
+signaled=/var/lib/code2-boot-signaled
+signal() {
+  local body
+  [ -n "$wait_handle" ] && [ ! -e $signaled ] || return 0
+  body=$(python3 -c 'import json,sys; print(json.dumps({"Status": sys.argv[1], "Reason": sys.argv[2][-900:], "UniqueId": "code2", "Data": sys.argv[2][-900:]}))' "$1" "$2")
+  curl -fsS --retry 3 -X PUT -H 'Content-Type:' --data-binary "$body" "$wait_handle" >/dev/null || true
+  touch $signaled
+}
+fail() {
+  trap - ERR
+  log "FAILED: $1"
+  signal FAILURE "$1 | $(tail -n 4 /var/log/code2-setup.log | tr '\n' ' ')"
+  exit 1
+}
+trap 'fail "line $LINENO exited $?"' ERR
+
+# Stack settings (SetupConfig in code2.yaml); only these names are taken from the parameter. A new name needs a
+# default here: the stack may still hold an older parameter (reconfigure before apply, or a rolled-back update).
+code_server_version='' oauth2_proxy_version='' remobi_version=1.2.1 auto_updates='' idle_hours=''
+session_hours='' vol='' user_pool='' cognito_host='' log_group=''
+settings="code_server_version oauth2_proxy_version remobi_version auto_updates idle_hours session_hours vol user_pool
+  cognito_host log_group"
+cfg=$(retry aws ssm get-parameter --region "$region" --name "/$stack/setup" --query Parameter.Value --output text)
+# shellcheck disable=SC2086
+eval "$(python3 -c '
+import json, shlex, sys
+cfg = json.loads(sys.argv[1])
+for k in sys.argv[2:]:
+    if k in cfg:
+        print(k + "=" + shlex.quote(str(cfg[k])))' "$cfg" $settings)"
+for v in $settings; do [ -n "${!v}" ] || fail "/$stack/setup has no $v"; done
+vol_serial=${vol/-/}   # nvme serial = volume id without the dash
+
+dl() { curl -fsSL --retry 5 --retry-all-errors --connect-timeout 10 -o "$2" "$1"; }
+# put <path> <mode>: writes stdin if it differs; succeeds only when changed.
+put() {
+  local tmp; tmp=$(mktemp)
+  cat > "$tmp"
+  if [ -f "$1" ] && cmp -s "$tmp" "$1"; then rm -f "$tmp"; return 1; fi
+  install -D -m "$2" "$tmp" "$1"; rm -f "$tmp"
+}
+# svc <unit> <restart>: enables the unit, restarts it when <restart> is set.
+svc() { systemctl daemon-reload; systemctl enable -q "$1"; systemctl "$([ -n "$2" ] && echo restart || echo start)" "$1"; }
+case $(uname -m) in
+  aarch64) arch=arm64 ;;
+  x86_64) arch=amd64 ;;
+  *) fail "unsupported architecture $(uname -m)" ;;
+esac
+work=$(mktemp -d)
+log "start (code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, remobi ${remobi_version}, $arch)"
+
+# ---- hostname: the stack name, not ip-10-...; cloud-init would set the EC2 name again at boot ----
+host=${stack,,}; host=${host:0:63}; host=${host%%-}
+printf 'preserve_hostname: true\n' | put /etc/cloud/cloud.cfg.d/99-code2-hostname.cfg 644 || true
+[ "$(hostname)" = "$host" ] || hostnamectl set-hostname "$host"
+
+# ---- packages ----
+# nodejs22 and gcc-c++ for remobi (node-pty builds with node-gyp)
+pkgs="git tmux jq gcc gcc-c++ make tar xfsprogs python3-pip amazon-cloudwatch-agent nodejs22 nodejs22-npm"
+if [ "$auto_updates" = true ]; then
+  echo latest | put /etc/dnf/vars/releasever 644 || true   # follow new AL2023 releases, not the AMI's
+  pkgs="$pkgs dnf-automatic"
+fi
+# shellcheck disable=SC2086
+rpm -q $pkgs >/dev/null 2>&1 || retry dnf install -y -q $pkgs
+
+# ---- /home on the data volume ----
+dev=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${vol_serial}
+if [ ! -e "$dev" ]; then
+  token=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
+  iid=$(curl -fsS -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/instance-id)
+  # A replacement waits here until the old instance terminates.
+  for _ in $(seq 360); do
+    state=$(aws ec2 describe-volumes --region "$region" --volume-ids "$vol" \
+      --query 'Volumes[0].State' --output text 2>/dev/null || echo unknown)
+    if [ "$state" = available ]; then
+      aws ec2 attach-volume --region "$region" --volume-id "$vol" --instance-id "$iid" --device /dev/sdf >/dev/null || true
+    fi
+    [ -e "$dev" ] && break
+    sleep 10
+  done
+  [ -e "$dev" ] || fail "data volume $vol never attached (last state: $state)"
+fi
+if ! blkid "$dev" >/dev/null 2>&1; then
+  log "formatting the new /home volume"
+  mkfs.xfs -L code2-home "$dev"
+  mount "$dev" /mnt && cp -a /home/. /mnt/ && umount /mnt
+fi
+grep -q code2-home /etc/fstab || echo 'LABEL=code2-home /home xfs defaults,nofail 0 2' >> /etc/fstab
+systemctl daemon-reload
+mountpoint -q /home || mount /home
+xfs_growfs /home >/dev/null   # picks up a larger DataVolumeSize
+
+# ---- code-server ----
+cs=/usr/local/lib/code-server-${code_server_version}
+if [ ! -x "$cs/bin/code-server" ]; then
+  log "installing code-server ${code_server_version}"
+  dl "https://github.com/coder/code-server/releases/download/v${code_server_version}/code-server-${code_server_version}-linux-$arch.tar.gz" "$work/cs.tar.gz"
+  rm -rf "$cs" "$work/cs" && mkdir -p "$work/cs"
+  tar -xzf "$work/cs.tar.gz" -C "$work/cs" --strip-components 1
+  mv "$work/cs" "$cs"
+fi
+cs_restart=
+[ "$(readlink -f /usr/local/bin/code-server)" = "$cs/bin/code-server" ] || cs_restart=1
+ln -sfn "$cs/bin/code-server" /usr/local/bin/code-server
+put /etc/systemd/system/code-server.service 644 <<'UNIT' && cs_restart=1 || true
+[Unit]
+Description=code-server (VS Code) for ec2-user
+After=network-online.target home.mount
+Wants=network-online.target
+RequiresMountsFor=/home/ec2-user
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user
+Environment=HOME=/home/ec2-user
+ExecStart=/usr/local/bin/code-server --bind-addr 127.0.0.1:8080 --auth none --disable-telemetry --disable-update-check
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+svc code-server "$cs_restart"
+
+# ---- ttyd, the earlier terminal at /admin/ (replaced by remobi): removed if still there ----
+if [ -f /etc/systemd/system/ttyd.service ]; then
+  log "removing ttyd"
+  systemctl disable -q --now ttyd || true
+  rm -f /etc/systemd/system/ttyd.service /usr/local/bin/ttyd
+  rm -rf /usr/local/lib/ttyd-*
+  systemctl daemon-reload
+fi
+
+# ---- remobi, the phone terminal at /r/, behind oauth2-proxy ----
+rd=/usr/local/lib/remobi-${remobi_version}
+rcli=$rd/lib/node_modules/remobi/dist/cli.mjs
+if [ ! -f "$rcli" ]; then
+  log "installing remobi ${remobi_version}"
+  rm -rf "$work/remobi"
+  # npm checks each package against the registry's integrity hash; dependencies follow remobi's ranges.
+  HOME=/root retry npm-22 install -g -q --no-audit --no-fund --omit=dev --prefix "$work/remobi" "remobi@${remobi_version}"
+  rm -rf "$rd" && mv "$work/remobi" "$rd"
+fi
+rm_restart=
+[ "$(readlink -f /usr/local/bin/remobi)" = "$rcli" ] || rm_restart=1
+ln -sfn "$rd/bin/remobi" /usr/local/bin/remobi
+# Thinner toolbar: remobi has no style setting, so this CSS is appended to the stylesheet it inlines at start.
+put /etc/remobi/compact.css 644 <<'CSS' || true
+/* code2: no empty second row, tighter padding, half the home-indicator inset */
+#wt-toolbar .wt-row:empty{display:none}
+#wt-toolbar{padding:3px 4px calc(3px + env(safe-area-inset-bottom,0px) * .5) 4px}
+/* 40px buttons with or without the keyboard; 60px wide, shrinking to fit a narrow screen */
+#wt-toolbar button,#wt-toolbar.wt-kb-open button{min-height:40px}
+#wt-toolbar .wt-row:first-child button{width:60px}
+CSS
+rcss=$rd/lib/node_modules/remobi/dist/client.css
+[ -f "$rcss.orig" ] || cp "$rcss" "$rcss.orig"
+cat "$rcss.orig" /etc/remobi/compact.css | put "$rcss" 644 && rm_restart=1 || true
+# Opaque status bar: as a home-screen app with black-translucent, iPadOS 18.7 sizes the page short by the
+# status bar (innerHeight 712 on a 744pt screen) yet draws it from the top of the screen, so the top rows sit
+# under the status bar and the toolbar floats 32pt above the bottom. iOS reads the style when the app launches.
+for f in "$rd"/lib/node_modules/remobi/dist/meta-tags-*.mjs; do
+  if grep -q black-translucent "$f"; then sed -i 's/black-translucent/black/' "$f" && rm_restart=1; fi
+done
+# Toolbar on one row so the terminal keeps the screen; overrides go in /etc/remobi/remobi.config.local.mjs.
+put /etc/remobi/remobi.config.mjs 644 <<'CFG' && rm_restart=1 || true
+// code2: one toolbar row; the rest of the keys move to the ☰ drawer.
+const send = (id, label, description, data) => ({ id, label, description, action: { type: 'send', data } })
+const moved = new Set(['shift-tab', 'enter'])
+export default {
+  toolbar: {
+    row1: (defaults) => [
+      ...defaults.filter((b) => !moved.has(b.id)),
+      { id: 'drawer-toggle', label: '☰', description: 'Open command drawer', action: { type: 'drawer-toggle' } },
+    ],
+    row2: [],
+  },
+  drawer: {
+    buttons: (defaults) => [
+      { id: 'paste', label: 'Paste', description: 'Paste from clipboard', action: { type: 'paste' } },
+      send('enter', '⏎', 'Send Enter', '\r'),
+      send('backspace', '⌫', 'Send Backspace key', '\x7f'),
+      send('space', 'Space', 'Send Space', ' '),
+      send('shift-tab', 'S-Tab', 'Send Shift+Tab', '\x1b[Z'),
+      send('ctrl-d', 'C-d', 'Send Ctrl+D', '\x04'),
+      send('alt-enter', 'M-↵', 'Send Alt+Enter (ESC + Enter)', '\x1b\r'),
+      send('q', 'q', 'Send q', 'q'),
+      ...defaults,
+    ],
+  },
+  // Double-tap the terminal for Tab (completion without reaching for the toolbar).
+  gestures: { doubleTap: { enabled: true, data: '\t' } },
+}
+CFG
+# tmux 3.6a segfaults on copy mode's refresh-from-pane (r) after the window was resized, e.g. by a second
+# remobi client, and the crash takes every session down. /etc/tmux.conf loads before ~/.tmux.conf.
+put /etc/tmux.conf 644 <<'TMUX' && runuser -u ec2-user -- tmux source-file /etc/tmux.conf 2>/dev/null || true
+# code2: r in copy mode runs refresh-from-pane, which crashes tmux 3.6a
+unbind-key -T copy-mode r
+unbind-key -T copy-mode-vi r
+TMUX
+# tmux session admin, so a closed tab picks up where it left off. Loopback only; remobi checks the WebSocket
+# Origin against Host, which CloudFront and oauth2-proxy pass through.
+# KillMode=process keeps tmux on restart.
+put /etc/systemd/system/remobi.service 644 <<'UNIT' && rm_restart=1 || true
+[Unit]
+Description=remobi phone terminal for ec2-user at /r/
+After=network-online.target home.mount
+RequiresMountsFor=/home/ec2-user
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user
+Environment=HOME=/home/ec2-user
+ExecStart=/usr/bin/node-22 /usr/local/bin/remobi serve --host 127.0.0.1 --port 7682 --base-path /r --config /etc/remobi/remobi.config.mjs -- tmux new -A -s admin
+KillMode=process
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+svc remobi "$rm_restart"
+
+# ---- oauth2-proxy (Cognito OIDC) on :80 ----
+opd=/usr/local/lib/oauth2-proxy-v${oauth2_proxy_version}
+if [ ! -x "$opd/oauth2-proxy" ]; then
+  log "installing oauth2-proxy ${oauth2_proxy_version}"
+  op=oauth2-proxy-v${oauth2_proxy_version}.linux-$arch
+  base=https://github.com/oauth2-proxy/oauth2-proxy/releases/download/v${oauth2_proxy_version}
+  dl "$base/$op.tar.gz" "$work/$op.tar.gz"
+  dl "$base/$op.tar.gz-sha256sum.txt" "$work/$op.tar.gz-sha256sum.txt"
+  (cd "$work" && sha256sum -c "$op.tar.gz-sha256sum.txt" && tar -xzf "$op.tar.gz")
+  install -D -m 755 "$work/$op/oauth2-proxy" "$opd/oauth2-proxy"
+fi
+op_restart=
+[ "$(readlink -f /usr/local/bin/oauth2-proxy)" = "$opd/oauth2-proxy" ] || op_restart=1
+ln -sfn "$opd/oauth2-proxy" /usr/local/bin/oauth2-proxy
+id oauth2-proxy >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin oauth2-proxy
+install -d -m 750 -g oauth2-proxy /etc/oauth2-proxy
+
+# Published once CloudFront is up.
+conf=
+for _ in $(seq 180); do
+  conf=$(aws ssm get-parameter --region "$region" --name /${stack}/oauth2-proxy \
+    --query Parameter.Value --output text 2>/dev/null) && break
+  sleep 10
+done
+[ -n "$conf" ] || fail "oauth2-proxy settings never appeared in SSM /${stack}/oauth2-proxy"
+client_id=$(jq -r .clientId <<<"$conf")
+url=$(jq -r .url <<<"$conf")
+put /etc/oauth2-proxy/oauth2-proxy.cfg 644 <<CFG && op_restart=1 || true
+http_address = "0.0.0.0:80"
+# "/r/" matches the prefix; "/r" alone matches only itself and remobi redirects it to /r/
+upstreams = ["http://127.0.0.1:8080/", "http://127.0.0.1:7682/r/", "http://127.0.0.1:7682/r"]
+provider = "oidc"
+provider_display_name = "Cognito"
+oidc_issuer_url = "https://cognito-idp.$region.amazonaws.com/${user_pool}"
+# Explicit endpoints: discovery may report the old domain while it is replaced.
+skip_oidc_discovery = true
+login_url = "https://${cognito_host}/oauth2/authorize"
+redeem_url = "https://${cognito_host}/oauth2/token"
+oidc_jwks_url = "https://cognito-idp.$region.amazonaws.com/${user_pool}/.well-known/jwks.json"
+client_id = "$client_id"
+redirect_url = "$url/oauth2/callback"
+scope = "openid email profile"
+code_challenge_method = "S256"
+email_domains = ["*"]
+whitelist_domains = ["${cognito_host}"]
+skip_provider_button = true
+cookie_name = "_code2"
+cookie_secure = true
+cookie_samesite = "lax"
+cookie_expire = "${session_hours}h"
+cookie_refresh = "30m"
+# One CSRF cookie per sign-in, so a background request (service worker, favicon) that starts
+# another sign-in cannot replace the PKCE verifier and fail the callback with invalid_grant.
+cookie_csrf_per_request = true
+cookie_csrf_expire = "15m"
+silence_ping_logging = true
+CFG
+# Secrets stay out of the log; the cookie key is kept across reboots.
+secret=$(aws cognito-idp describe-user-pool-client --region "$region" --user-pool-id ${user_pool} \
+  --client-id "$client_id" --query UserPoolClient.ClientSecret --output text)
+cookie=$(sed -n 's/^OAUTH2_PROXY_COOKIE_SECRET=//p' /etc/oauth2-proxy/secrets.env 2>/dev/null || true)
+[ -n "$cookie" ] || cookie=$(python3 -c 'import os,base64;print(base64.urlsafe_b64encode(os.urandom(32)).decode())')
+printf 'OAUTH2_PROXY_CLIENT_SECRET=%s\nOAUTH2_PROXY_COOKIE_SECRET=%s\n' "$secret" "$cookie" \
+  | put /etc/oauth2-proxy/secrets.env 600 && op_restart=1 || true
+put /etc/systemd/system/oauth2-proxy.service 644 <<'UNIT' && op_restart=1 || true
+[Unit]
+Description=oauth2-proxy (Cognito sign-in in front of code-server and remobi)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=oauth2-proxy
+Group=oauth2-proxy
+EnvironmentFile=/etc/oauth2-proxy/secrets.env
+ExecStart=/usr/local/bin/oauth2-proxy --config=/etc/oauth2-proxy/oauth2-proxy.cfg
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+svc oauth2-proxy "$op_restart"
+
+# ---- CloudWatch agent ----
+put /opt/aws/amazon-cloudwatch-agent/etc/code2.json 644 <<JSON && cw_restart=1 || cw_restart=
+{
+  "agent": { "metrics_collection_interval": 300 },
+  "metrics": {
+    "append_dimensions": { "InstanceId": "\${aws:InstanceId}" },
+    "metrics_collected": {
+      "disk": { "measurement": ["used_percent"], "resources": ["/", "/home"], "drop_device": true },
+      "mem": { "measurement": ["used_percent"] }
+    }
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          { "file_path": "/var/log/code2-setup.log", "log_group_name": "${log_group}", "log_stream_name": "{instance_id}/setup" },
+          { "file_path": "/var/log/code2-idle.log", "log_group_name": "${log_group}", "log_stream_name": "{instance_id}/idle" }
+        ]
+      }
+    }
+  }
+}
+JSON
+if [ -n "$cw_restart" ] || ! systemctl is-active -q amazon-cloudwatch-agent; then
+  /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s \
+    -c file:/opt/aws/amazon-cloudwatch-agent/etc/code2.json >/dev/null
+fi
+
+# ---- security updates ----
+if [ "$auto_updates" = true ]; then
+  sed -i -e 's/^upgrade_type *=.*/upgrade_type = security/' -e 's/^apply_updates *=.*/apply_updates = yes/' /etc/dnf/automatic.conf
+  systemctl enable --now dnf-automatic.timer
+elif systemctl list-unit-files dnf-automatic.timer >/dev/null 2>&1; then
+  systemctl disable --now dnf-automatic.timer || true
+fi
+
+# ---- idle stop ----
+put /usr/local/sbin/code2-idle 755 <<'IDLE' || true
+#!/bin/bash
+# code2-idle <hours>: stops the instance after <hours> with no viewer, SSH session or load.
+stamp=/run/code2-active
+if [ ! -f $stamp ] || ss -Htn state established '( sport = :80 or sport = :22 )' | grep -q . \
+   || pgrep -u ssm-user >/dev/null || awk '{ exit !($1 > 0.5) }' /proc/loadavg; then
+  touch $stamp
+fi
+idle=$(( $(date +%s) - $(stat -c %Y $stamp) ))
+if [ "$idle" -ge $(( $1 * 3600 )) ]; then
+  echo "$(date -u +%FT%TZ) idle for $idle s, stopping" >> /var/log/code2-idle.log
+  systemctl poweroff
+fi
+IDLE
+if [ "$idle_hours" -gt 0 ]; then
+  put /etc/systemd/system/code2-idle.service 644 <<'UNIT' || true
+[Unit]
+Description=code2 idle stop check
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/code2-idle.env
+ExecStart=/usr/local/sbin/code2-idle $HOURS
+UNIT
+  put /etc/systemd/system/code2-idle.timer 644 <<'UNIT' || true
+[Unit]
+Description=code2 idle stop check every 5 minutes
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target
+UNIT
+  echo "HOURS=$idle_hours" | put /etc/code2-idle.env 644 || true
+  systemctl daemon-reload
+  systemctl enable --now code2-idle.timer
+elif [ -f /etc/systemd/system/code2-idle.timer ]; then
+  systemctl disable --now code2-idle.timer || true
+fi
+
+# ---- run the bootstrap again on every boot ----
+put /var/lib/cloud/scripts/per-boot/code2-setup 755 <<'HOOK' || true
+#!/bin/bash
+# Reruns the user data bootstrap, which fetches and runs the current setup.sh, on every boot.
+t=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
+curl -fsS -H "X-aws-ec2-metadata-token: $t" http://169.254.169.254/latest/user-data > /run/code2-userdata
+exec bash /run/code2-userdata
+HOOK
+
+rm -rf "$work"
+log "done"
+signal SUCCESS "code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, remobi ${remobi_version} running"
+
+# ---- Claude Code and Codex for ec2-user: CLIs and code-server extensions ----
+# Last, after the BootWait signal: they are optional, and their downloads must not hold up the services or the
+# stack. Installed into /home, so they outlive an instance replacement and keep their own updates (Claude Code
+# updates itself, Codex with npm, the extensions in code-server). A CLI is removed and installed again only when it
+# does not run: missing, half installed, or built for the other architecture after an instance type change. An
+# extension is installed only when missing (README: changing the architecture). All steps share a 15-minute
+# budget (timeout stops the whole process group), and a failure only warns; the next run retries.
+uhome=/home/ec2-user ai_deadline=$((SECONDS + 900))
+as_user() {   # as_user <seconds> <command...>: as ec2-user, stopped after <seconds> or when the budget runs out
+  local cap=$1 left=$((ai_deadline - SECONDS)); shift
+  [ "$left" -gt 0 ] || { log "AI tools: time budget used up, skipping $1" >&2; return 124; }
+  [ "$cap" -le "$left" ] || cap=$left
+  runuser -u ec2-user -- timeout -k 10 "$cap" env HOME=$uhome PATH="$uhome/.local/bin:/usr/local/bin:/usr/bin:/bin" "$@"
+}
+runs() { as_user 30 "$1" --version >/dev/null 2>&1; }
+try3() { local n; for n in 1 2 3; do "$@" && return 0; [ $((ai_deadline - SECONDS)) -gt 20 ] || return 1; sleep 10; done; return 1; }
+claude_install() {
+  # Removed first: the installer keeps a version it already has, even one built for the other architecture
+  # (the config stays in ~/.claude). The installer checks the binary against the sha256 in its release manifest.
+  as_user 30 rm -rf $uhome/.local/bin/claude $uhome/.local/share/claude || true
+  local s; s=$(as_user 120 curl -fsSL --connect-timeout 10 --max-time 60 https://claude.ai/install.sh) && as_user 600 bash -s <<<"$s"
+}
+codex_install() {
+  # Removed first so npm fetches the native package for this architecture again (the config stays in ~/.codex).
+  as_user 120 npm-22 rm -g -q --prefix $uhome/.local @openai/codex >/dev/null 2>&1 || true
+  as_user 300 npm-22 install -g -q --no-audit --no-fund --prefix $uhome/.local @openai/codex
+}
+if ! runs claude; then
+  log "installing Claude Code"
+  { try3 claude_install && runs claude; } || log "warning: Claude Code install failed; the next setup run retries it"
+fi
+if ! runs codex; then
+  log "installing Codex CLI"
+  { try3 codex_install && runs codex; } || log "warning: Codex CLI install failed; the next setup run retries it"
+fi
+exts=$(as_user 60 code-server --list-extensions 2>/dev/null || true)
+for ext in anthropic.claude-code openai.chatgpt; do   # openai.chatgpt is the Codex extension
+  grep -qix "$ext" <<<"$exts" && continue
+  log "installing code-server extension $ext"
+  try3 as_user 300 code-server --install-extension "$ext" \
+    || log "warning: extension $ext install failed; the next setup run retries it"
+done

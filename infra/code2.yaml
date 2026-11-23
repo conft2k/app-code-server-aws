@@ -1,0 +1,936 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  code2 - a personal VS Code server in the browser. CloudFront (VPC origin) -> private EC2 (oauth2-proxy :80 with
+  Cognito sign-in -> code-server 127.0.0.1:8080). Own VPC, NAT and EC2 Instance Connect Endpoint, or an existing VPC.
+  Deployed with infra/deploy.sh.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Sign-in }
+        Parameters: [AdminUsername, AdminEmail, Mfa, PasswordMinLength, SessionHours]
+      - Label: { default: Server }
+        Parameters: [InstanceType, ImageId, RootVolumeSize, DataVolumeSize, DataSnapshotId, CodeServerVersion,
+                     OAuth2ProxyVersion, RemobiVersion, AutoUpdates, IdleStopHours]
+      - Label: { default: Operations }
+        Parameters: [BackupRetainCount, AlarmEmail, WaitForBoot, OriginSlot, SetupBucket]
+      - Label: { default: Network (create-time) }
+        Parameters: [AvailabilityZone, CloudFrontPrefixListId, VpcCidr, PublicSubnetCidr, PrivateSubnetCidr, ExistingVpcId, ExistingSubnetId,
+                     ExistingEiceId, ExistingEiceSecurityGroupId]
+      - Label: { default: Edge }
+        Parameters: [DomainName, HostedZoneId, CertificateArn, AuthDomainName, AuthCertificateArn, PriceClass]
+
+Parameters:
+  AvailabilityZone:
+    Type: String
+    Default: ""
+    Description: >-
+      AZ of the instance and /home (deploy.sh picks one offering InstanceType); required with ExistingSubnetId
+  VpcCidr:
+    Type: String
+    Default: 10.42.0.0/16
+    Description: CIDR of the new VPC (ignored with ExistingVpcId)
+  CloudFrontPrefixListId:
+    Type: String
+    AllowedPattern: "^pl-[0-9a-f]+$"
+    Description: >-
+      com.amazonaws.global.cloudfront.origin-facing prefix list (deploy.sh looks it up); :80 is open to it only
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.42.0.0/24
+    Description: NAT gateway subnet (new VPC only)
+  PrivateSubnetCidr:
+    Type: String
+    Default: 10.42.1.0/24
+    Description: Instance and EC2 Instance Connect Endpoint subnet (new VPC only)
+  ExistingVpcId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^vpc-[0-9a-f]+$"
+    Description: >-
+      Optional existing VPC (with an internet gateway); ExistingSubnetId must be private with NAT egress
+  ExistingSubnetId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^subnet-[0-9a-f]+$"
+    Description: Private subnet of ExistingVpcId for the instance (only with ExistingVpcId)
+  ExistingEiceId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^eice-[0-9a-f]+$"
+    Description: Use this EC2 Instance Connect Endpoint (one per VPC) instead of creating one
+  ExistingEiceSecurityGroupId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^sg-[0-9a-f]+$"
+    Description: Security group of ExistingEiceId; the instance allows SSH from it
+  DomainName:
+    Type: String
+    Default: ""
+    Description: Optional custom name (e.g. code.example.com). Leave empty to use the CloudFront domain.
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: Route 53 public hosted zone of DomainName (only with DomainName)
+  CertificateArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:aws:acm:us-east-1:\\d{12}:certificate/.+$"
+    Description: ACM certificate in us-east-1 covering DomainName (only with DomainName)
+  AuthDomainName:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional Cognito sign-in name under DomainName (e.g. auth.code.example.com); empty uses the prefix domain
+  AuthCertificateArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:aws:acm:us-east-1:\\d{12}:certificate/.+$"
+    Description: ACM certificate in us-east-1 covering AuthDomainName (only with AuthDomainName)
+  PriceClass:
+    Type: String
+    Default: PriceClass_200
+    AllowedValues: [PriceClass_100, PriceClass_200, PriceClass_All]
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      AL2023 AMI for InstanceType's architecture; deploy.sh keeps it on update unless asked (a new one replaces
+      the instance)
+  InstanceType:
+    Type: String
+    Default: t4g.medium
+    AllowedPattern: '^[a-z][a-z0-9-]*\.[a-z0-9]+$'
+    Description: >-
+      Any Nitro type, Graviton or x86 (the instance finds /home by its NVMe id); ImageId must match its architecture
+  RootVolumeSize:
+    Type: Number
+    Default: 30
+    MinValue: 30
+    Description: GiB of the root volume (changing it replaces the instance; /home stays)
+  DataVolumeSize:
+    Type: Number
+    Default: 50
+    MinValue: 20
+    Description: GiB of the /home volume (kept as a snapshot when the stack deletes it); can grow, never shrink
+  DataSnapshotId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^snap-[0-9a-f]+$"
+    Description: Create /home from this snapshot (a previous code2 /home); DataVolumeSize must be at least its size
+  CodeServerVersion:
+    Type: String
+    Default: 4.139.1
+    AllowedPattern: '^\d+\.\d+\.\d+$'
+    Description: Installed in place by deploy.sh (no restart)
+  OAuth2ProxyVersion:
+    Type: String
+    Default: 7.15.5
+    AllowedPattern: '^\d+\.\d+\.\d+$'
+    Description: Installed in place by deploy.sh (no restart)
+  RemobiVersion:
+    Type: String
+    Default: 1.2.1
+    AllowedPattern: '^\d+\.\d+\.\d+$'
+    Description: Phone terminal at /r/ (npm package remobi); installed in place by deploy.sh (no restart)
+  AutoUpdates:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Daily security updates with dnf-automatic, following the latest AL2023 release (no automatic reboot)
+  IdleStopHours:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 72
+    Description: >-
+      Stop after this many hours with no browser tab, SSH session or load (0 = never); deploy.sh start restarts
+  SessionHours:
+    Type: Number
+    Default: 12
+    MinValue: 1
+    MaxValue: 168
+    Description: How long a sign-in lasts (Cognito refresh token and the oauth2-proxy cookie)
+  Mfa:
+    Type: String
+    Default: "on"
+    AllowedValues: ["on", "off"]
+    # No OPTIONAL: managed login never offers TOTP setup in it.
+    Description: "on: TOTP set up on first sign-in and asked every time; off: password only"
+  PasswordMinLength:
+    Type: Number
+    Default: 12
+    MinValue: 8
+    MaxValue: 99
+    Description: Minimum password length (lowercase letters and digits are always required)
+  BackupRetainCount:
+    Type: Number
+    Default: 7
+    MinValue: 0
+    MaxValue: 1000
+    Description: Daily /home snapshots to keep (Data Lifecycle Manager, 03:00 KST); 0 turns backups off
+  AlarmEmail:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[^@\\s]+@[^@\\s]+$"
+    Description: Optional address for CloudWatch alarms (instance status, disk usage, setup failures); confirm the SNS mail
+  OriginSlot:
+    Type: String
+    Default: a
+    AllowedValues: [a, b]
+    Description: >-
+      VPC origin in use. One cannot move to another instance, so deploy.sh flips the slot when the instance is
+      replaced.
+  WaitForBoot:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Create waits for a working setup and rolls back otherwise (false for stacks that predate it)
+  SetupBucket:
+    Type: String
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+    Description: S3 bucket deploy.sh uploads infra/setup.sh to (<bucket>/<stack>/setup.sh); the instance runs it at boot
+  AdminUsername:
+    Type: String
+    Default: admin
+    AllowedPattern: '^[a-zA-Z0-9._-]+$'
+    Description: The account Cognito creates and emails a temporary password to
+  AdminEmail:
+    Type: String
+    AllowedPattern: "^[^@\\s]+@[^@\\s]+$"
+    Description: Where the temporary password goes
+
+Rules:
+  CustomDomain:
+    RuleCondition: !Not [!Equals [!Ref DomainName, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref HostedZoneId, ""]]
+        AssertDescription: DomainName needs HostedZoneId (its Route 53 public hosted zone)
+      - Assert: !Not [!Equals [!Ref CertificateArn, ""]]
+        AssertDescription: DomainName needs CertificateArn (an issued us-east-1 ACM certificate covering it)
+  AuthDomain:
+    RuleCondition: !Not [!Equals [!Ref AuthDomainName, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref DomainName, ""]]
+        AssertDescription: AuthDomainName needs DomainName (its hosted zone and the parent name Cognito requires)
+      - Assert: !Not [!Equals [!Ref AuthCertificateArn, ""]]
+        AssertDescription: AuthDomainName needs AuthCertificateArn (an issued us-east-1 ACM certificate covering it)
+  ExistingNetwork:
+    RuleCondition: !Not [!Equals [!Ref ExistingVpcId, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ExistingSubnetId, ""]]
+        AssertDescription: ExistingVpcId needs ExistingSubnetId (a private subnet with NAT egress)
+      - Assert: !Not [!Equals [!Ref AvailabilityZone, ""]]
+        AssertDescription: ExistingVpcId needs AvailabilityZone (the AZ of ExistingSubnetId)
+  ExistingEndpoint:
+    RuleCondition: !Not [!Equals [!Ref ExistingEiceId, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ExistingEiceSecurityGroupId, ""]]
+        AssertDescription: ExistingEiceId needs ExistingEiceSecurityGroupId
+
+Conditions:
+  HasDomain: !Not [!Equals [!Ref DomainName, ""]]
+  HasAuthDomain: !Not [!Equals [!Ref AuthDomainName, ""]]
+  HasAz: !Not [!Equals [!Ref AvailabilityZone, ""]]
+  CreateNetwork: !Equals [!Ref ExistingVpcId, ""]
+  CreateEice: !Equals [!Ref ExistingEiceId, ""]
+  UseExistingEice: !Not [!Equals [!Ref ExistingEiceId, ""]]
+  MfaOn: !Equals [!Ref Mfa, "on"]
+  HasSnapshot: !Not [!Equals [!Ref DataSnapshotId, ""]]
+  HasBackup: !Not [!Equals [!Ref BackupRetainCount, 0]]
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
+  WaitsForBoot: !Equals [!Ref WaitForBoot, "true"]
+  OriginSlotA: !Equals [!Ref OriginSlot, a]
+  OriginSlotB: !Equals [!Ref OriginSlot, b]
+  # T families are burstable ("t4g" split on "t" starts with ""); Trainium (trn*) is not.
+  IsBurstable: !And
+    - !Equals [!Select [0, !Split [t, !Select [0, !Split [".", !Ref InstanceType]]]], ""]
+    - !Not [!Equals [!Select [0, !Split [tr, !Select [0, !Split [".", !Ref InstanceType]]]], ""]]
+
+Resources:
+  # --- network (skipped with ExistingVpcId) ---
+  Vpc:
+    Type: AWS::EC2::VPC
+    Condition: CreateNetwork
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-vpc" }]
+
+  # CloudFront VPC origins need an internet gateway on the VPC.
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Condition: CreateNetwork
+    Properties:
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-igw" }]
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreateNetwork
+    Properties: { VpcId: !Ref Vpc, InternetGatewayId: !Ref InternetGateway }
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: CreateNetwork
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !If [HasAz, !Ref AvailabilityZone, !Select [0, !GetAZs ""]]
+      CidrBlock: !Ref PublicSubnetCidr
+      MapPublicIpOnLaunch: false
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-subnet-pub" }]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateNetwork
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-rtb-pub" }]
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateNetwork
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateNetwork
+    Properties: { SubnetId: !Ref PublicSubnet, RouteTableId: !Ref PublicRouteTable }
+
+  NatEip:
+    Type: AWS::EC2::EIP
+    Condition: CreateNetwork
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-eip-natgw" }]
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateNetwork
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      AllocationId: !GetAtt NatEip.AllocationId
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-natgw" }]
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: CreateNetwork
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !If [HasAz, !Ref AvailabilityZone, !Select [0, !GetAZs ""]]
+      CidrBlock: !Ref PrivateSubnetCidr
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-subnet-pri" }]
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateNetwork
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-rtb-pri" }]
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateNetwork
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateNetwork
+    Properties: { SubnetId: !Ref PrivateSubnet, RouteTableId: !Ref PrivateRouteTable }
+
+  # dnf repos and other S3 traffic skip the NAT gateway.
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateNetwork
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      RouteTableIds: [!Ref PrivateRouteTable]
+
+  # Stands in for "network ready" in both modes (DependsOn cannot name a resource whose condition is false).
+  NetworkReady:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Metadata:
+      Route: !If [CreateNetwork, !Ref PrivateDefaultRoute, ""]
+      Association: !If [CreateNetwork, !Ref PrivateSubnetRoutes, ""]
+      Gateway: !If [CreateNetwork, !Ref GatewayAttachment, ""]
+
+  # --- security groups ---
+  # VPC origin traffic comes from CloudFront's origin-facing prefix list, not VPC IPs (a CIDR rule gives 504).
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: code2 EC2 - oauth2-proxy :80 from CloudFront (VPC origin), SSH from the EICE
+      VpcId: !If [CreateNetwork, !Ref Vpc, !Ref ExistingVpcId]
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, SourcePrefixListId: !Ref CloudFrontPrefixListId,
+            Description: CloudFront VPC origin }
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 0.0.0.0/0, Description: "dev box: git, package registries, extensions (NAT)" }
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-sg-ec2" }]
+
+  EiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateEice
+    Properties:
+      GroupDescription: code2 EC2 Instance Connect Endpoint - SSH to the instance only
+      VpcId: !If [CreateNetwork, !Ref Vpc, !Ref ExistingVpcId]
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, DestinationSecurityGroupId: !Ref InstanceSecurityGroup,
+            Description: SSH to the code2 instance }
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-sg-eice" }]
+
+  InstanceSshFromEice:
+    Type: AWS::EC2::SecurityGroupIngress
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [W1030] } }   # Existing* defaults are ""; Rules require real ids
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId: !If [CreateEice, !Ref EiceSecurityGroup, !Ref ExistingEiceSecurityGroupId]
+      Description: EC2 Instance Connect Endpoint
+
+  # An existing EICE's group may allow egress to listed groups only.
+  EiceSshToInstance:
+    Type: AWS::EC2::SecurityGroupEgress
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [W1030] } }   # Existing* defaults are ""; Rules require real ids
+    Condition: UseExistingEice
+    Properties:
+      GroupId: !Ref ExistingEiceSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      DestinationSecurityGroupId: !Ref InstanceSecurityGroup
+      Description: !Sub "SSH to the ${AWS::StackName} code2 instance"
+
+  InstanceConnectEndpoint:
+    Type: AWS::EC2::InstanceConnectEndpoint
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [W1030] } }   # Existing* defaults are ""; Rules require real ids
+    Condition: CreateEice
+    Properties:
+      SubnetId: !If [CreateNetwork, !Ref PrivateSubnet, !Ref ExistingSubnetId]
+      SecurityGroupIds: [!Ref EiceSecurityGroup]
+      PreserveClientIp: false
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-eice" }]
+
+  # --- sign-in ---
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-users"
+      UserPoolTier: ESSENTIALS
+      DeletionProtection: ACTIVE
+      AliasAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      UsernameConfiguration: { CaseSensitive: false }
+      # A sudo shell sits behind this login.
+      MfaConfiguration: !If [MfaOn, "ON", "OFF"]
+      EnabledMfas: !If [MfaOn, [SOFTWARE_TOKEN_MFA], !Ref "AWS::NoValue"]
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+        InviteMessageTemplate:
+          EmailSubject: "[code2] VS Code 계정이 만들어졌습니다"
+          # Without a custom domain the URL is known only after the distribution exists.
+          EmailMessage: !Sub
+            - >-
+              code2 (VS Code) 계정입니다.<br><br>
+              사용자 이름: {username}<br>임시 암호: {####}<br><br>
+              ${Where}에 접속해 위 정보로 로그인한 뒤 ${Setup} 임시 암호는 7일 동안 쓸 수 있습니다.
+            - Where: !If [HasDomain, !Sub "https://${DomainName} ", "code2 주소(infra/deploy.sh status 의 url)"]
+              Setup: !If [MfaOn, "새 암호와 인증 앱(TOTP)을 등록해 주세요.", "새 암호를 정해 주세요."]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: !Ref PasswordMinLength
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireUppercase: false
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 7
+      AccountRecoverySetting:
+        RecoveryMechanisms: [{ Name: verified_email, Priority: 1 }]
+      Schema:
+        - { Name: email, AttributeDataType: String, Required: true, Mutable: true }
+      UserPoolTags: { project: code2 }
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: code2-oauth2-proxy
+      GenerateSecret: true              # confidential client; the instance reads the secret at boot
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      SupportedIdentityProviders: [COGNITO]
+      CallbackURLs:
+        - !Sub
+          - "https://${Host}/oauth2/callback"
+          - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+      LogoutURLs:
+        - !Sub
+          - "https://${Host}/"
+          - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+      ExplicitAuthFlows: [ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      IdTokenValidity: 60
+      AccessTokenValidity: 60
+      RefreshTokenValidity: !Ref SessionHours
+      TokenValidityUnits: { IdToken: minutes, AccessToken: minutes, RefreshToken: hours }
+
+  # A custom domain needs its parent name (DnsA) to resolve.
+  ParentDnsReady:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Metadata:
+      Record: !If [HasDomain, !Ref DnsA, ""]
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    DependsOn: ParentDnsReady
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !If [HasAuthDomain, !Ref AuthDomainName, !Sub "${AWS::StackName}-${AWS::AccountId}"]
+      CustomDomainConfig: !If [HasAuthDomain, { CertificateArn: !Ref AuthCertificateArn }, !Ref "AWS::NoValue"]
+      ManagedLoginVersion: 2
+
+  AuthDnsA:
+    Type: AWS::Route53::RecordSet
+    Condition: HasAuthDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref AuthDomainName
+      Type: A
+      AliasTarget: { DNSName: !GetAtt UserPoolDomain.CloudFrontDistribution, HostedZoneId: Z2FDTNDATAQYW2 }
+
+  AuthDnsAAAA:
+    Type: AWS::Route53::RecordSet
+    Condition: HasAuthDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref AuthDomainName
+      Type: AAAA
+      AliasTarget: { DNSName: !GetAtt UserPoolDomain.CloudFrontDistribution, HostedZoneId: Z2FDTNDATAQYW2 }
+
+  ManagedLoginBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    DependsOn: UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientId: !Ref UserPoolClient
+      UseCognitoProvidedValues: true
+
+  AdminUser:
+    Type: AWS::Cognito::UserPoolUser
+    Properties:
+      UserPoolId: !Ref UserPool
+      Username: !Ref AdminUsername
+      DesiredDeliveryMediums: [EMAIL]
+      ForceAliasCreation: true          # a replaced user takes the email alias over from the old one
+      UserAttributes:
+        - { Name: email, Value: !Ref AdminEmail }
+        - { Name: email_verified, Value: "true" }
+
+  # Client id and URL reach the instance here (the distribution points at the instance).
+  OAuth2ProxyConfig:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${AWS::StackName}/oauth2-proxy"
+      Type: String
+      Description: code2 oauth2-proxy client id and public URL, read by the instance at boot
+      Value: !Sub
+        - '{"clientId":"${UserPoolClient}","url":"https://${Host}"}'
+        - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+
+  # Everything setup.sh needs besides the stack name and region. A change is applied by deploy.sh reconfigure.
+  SetupConfig:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${AWS::StackName}/setup"
+      Type: String
+      Description: code2 setup.sh settings, read by the instance at every run
+      Value: !Sub
+        - >-
+          {"code_server_version":"${CodeServerVersion}","oauth2_proxy_version":"${OAuth2ProxyVersion}",
+          "remobi_version":"${RemobiVersion}","auto_updates":"${AutoUpdates}","idle_hours":"${IdleStopHours}",
+          "session_hours":"${SessionHours}","vol":"${DataVolume}","user_pool":"${UserPool}",
+          "cognito_host":"${CognitoHost}","log_group":"${LogGroup}"}
+        # Not from UserPoolDomain (it waits for DnsA, which waits for the instance).
+        - CognitoHost: !If
+            - HasAuthDomain
+            - !Ref AuthDomainName
+            - !Sub "${AWS::StackName}-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com"
+
+  # --- compute ---
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: code2 EC2 - SSM management, CloudWatch agent, attaches its /home volume, reads its own Cognito client secret and setup.sh
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy"
+      Policies:
+        - PolicyName: code2-auth
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ClientSecret
+                Effect: Allow
+                Action: cognito-idp:DescribeUserPoolClient
+                Resource: !GetAtt UserPool.Arn
+              - Sid: ProxyConfig
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/oauth2-proxy"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/setup"
+              - Sid: SetupScript
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${SetupBucket}/${AWS::StackName}/setup.sh"
+                Condition:   # only this account's bucket: the name is predictable
+                  StringEquals: { "s3:ResourceAccount": !Ref "AWS::AccountId" }
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # The instance attaches /home itself at boot, so a replacement takes it over once the old one terminates.
+  # Separate from the role so the attach is limited to this instance profile.
+  VolumeAttachPolicy:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: !Ref InstanceRole
+      PolicyName: code2-home-volume
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DescribeVolume
+            Effect: Allow
+            Action: ec2:DescribeVolumes
+            Resource: "*"
+          - Sid: AttachHomeVolume
+            Effect: Allow
+            Action: ec2:AttachVolume
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/${DataVolume}"
+          - Sid: ToThisInstanceProfileOnly
+            Effect: Allow
+            Action: ec2:AttachVolume
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+            Condition:
+              StringEquals: { "ec2:InstanceProfile": !GetAtt InstanceProfile.Arn }
+
+  # /home, kept across instance replacement; stack deletion leaves a snapshot.
+  DataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      AvailabilityZone: !If [HasAz, !Ref AvailabilityZone, !Select [0, !GetAZs ""]]
+      Size: !Ref DataVolumeSize
+      SnapshotId: !If [HasSnapshot, !Ref DataSnapshotId, !Ref "AWS::NoValue"]
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-ebs-home" }
+        - { Key: code2-backup, Value: !Ref "AWS::StackName" }
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/code2/${AWS::StackName}"
+      RetentionInDays: 30
+
+  # Presigned URL for the first-boot result (BootWait).
+  BootWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [W1030] } }   # Existing* defaults are ""; Rules require real ids
+    DependsOn: [NetworkReady, VolumeAttachPolicy, SetupConfig]   # setup.sh downloads from GitHub and attaches /home
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      SubnetId: !If [CreateNetwork, !Ref PrivateSubnet, !Ref ExistingSubnetId]
+      SecurityGroupIds: [!Ref InstanceSecurityGroup]
+      IamInstanceProfile: !Ref InstanceProfile
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+        HttpEndpoint: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: !Ref RootVolumeSize, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+      CreditSpecification: !If [IsBurstable, { CPUCredits: standard }, !Ref "AWS::NoValue"]
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-ec2" }]
+      # Fixed for the stack's life: settings and the script itself change without touching it (no restart).
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # code2 bootstrap: runs infra/setup.sh, uploaded by deploy.sh, with the settings in /${AWS::StackName}/setup.
+          export CODE2_STACK=${AWS::StackName} AWS_REGION=${AWS::Region} CODE2_WAIT_HANDLE='${BootWaitHandle}'
+          for n in 1 2 3 4 5; do
+            aws s3api get-object --bucket ${SetupBucket} --key ${AWS::StackName}/setup.sh \
+              --expected-bucket-owner ${AWS::AccountId} /run/code2-setup.sh >/dev/null && exec bash /run/code2-setup.sh
+            sleep $((n * 10))
+          done
+          curl -fsS -X PUT -H 'Content-Type:' --data-binary \
+            '{"Status":"FAILURE","Reason":"setup.sh not in s3://${SetupBucket}","UniqueId":"code2","Data":""}' "$CODE2_WAIT_HANDLE"
+          exit 1
+
+  # Create waits for the first boot and rolls back on a failed setup, with the failing line in the reason.
+  BootWait:
+    Type: AWS::CloudFormation::WaitCondition
+    Condition: WaitsForBoot
+    DependsOn: OAuth2ProxyConfig
+    Properties:
+      Handle: !Ref BootWaitHandle
+      Timeout: "1800"
+      Count: 1
+
+  # --- backups ---
+  BackupRole:
+    Type: AWS::IAM::Role
+    Condition: HasBackup
+    Properties:
+      Description: code2 Data Lifecycle Manager - daily /home snapshots
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: dlm.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole"
+
+  BackupPolicy:
+    Type: AWS::DLM::LifecyclePolicy
+    Condition: HasBackup
+    Properties:
+      Description: !Sub "${AWS::StackName} home volume daily snapshots"
+      State: ENABLED
+      ExecutionRoleArn: !GetAtt BackupRole.Arn
+      PolicyDetails:
+        PolicyType: EBS_SNAPSHOT_MANAGEMENT
+        ResourceTypes: [VOLUME]
+        TargetTags: [{ Key: code2-backup, Value: !Ref "AWS::StackName" }]
+        Schedules:
+          - Name: daily
+            CreateRule: { Interval: 24, IntervalUnit: HOURS, Times: ["18:00"] }   # UTC, 03:00 KST
+            RetainRule: { Count: !Ref BackupRetainCount }
+            CopyTags: true
+
+  # --- alarms (with AlarmEmail) ---
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlarmEmail
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-alarms"
+      Subscription: [{ Protocol: email, Endpoint: !Ref AlarmEmail }]
+
+  InstanceStatusAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlarmEmail
+    Properties:
+      AlarmDescription: !Sub "${AWS::StackName}: EC2 status check failing"
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions: [{ Name: InstanceId, Value: !Ref Instance }]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+  HomeDiskAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlarmEmail
+    Properties:
+      AlarmDescription: !Sub "${AWS::StackName}: /home more than 85% full"
+      Namespace: CWAgent
+      MetricName: disk_used_percent
+      Dimensions:
+        - { Name: InstanceId, Value: !Ref Instance }
+        - { Name: path, Value: /home }
+        - { Name: fstype, Value: xfs }
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 85
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  RootDiskAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlarmEmail
+    Properties:
+      AlarmDescription: !Sub "${AWS::StackName}: root volume more than 85% full"
+      Namespace: CWAgent
+      MetricName: disk_used_percent
+      Dimensions:
+        - { Name: InstanceId, Value: !Ref Instance }
+        - { Name: path, Value: / }
+        - { Name: fstype, Value: xfs }
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 85
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  SetupFailureFilter:
+    Type: AWS::Logs::MetricFilter
+    Condition: HasAlarmEmail
+    Properties:
+      LogGroupName: !Ref LogGroup
+      FilterPattern: '"code2-setup" "FAILED"'
+      MetricTransformations:
+        - { MetricNamespace: code2, MetricName: !Sub "${AWS::StackName}-setup-failures", MetricValue: "1" }
+
+  SetupFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlarmEmail
+    Properties:
+      AlarmDescription: !Sub "${AWS::StackName}: boot-time setup failed (deploy.sh logs)"
+      Namespace: code2
+      MetricName: !Sub "${AWS::StackName}-setup-failures"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  # --- edge ---
+  # Two slots (see OriginSlot); slot a keeps the original logical id.
+  InstanceVpcOrigin:
+    Type: AWS::CloudFront::VpcOrigin
+    Condition: OriginSlotA
+    DependsOn: NetworkReady
+    Properties:
+      VpcOriginEndpointConfig:
+        Name: !Sub "${AWS::StackName}-vpco-ec2"
+        Arn: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}"
+        HTTPPort: 80
+        HTTPSPort: 443
+        OriginProtocolPolicy: http-only
+
+  InstanceVpcOriginB:
+    Type: AWS::CloudFront::VpcOrigin
+    Condition: OriginSlotB
+    DependsOn: NetworkReady
+    Properties:
+      VpcOriginEndpointConfig:
+        Name: !Sub "${AWS::StackName}-vpco-ec2-b"
+        Arn: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}"
+        HTTPPort: 80
+        HTTPSPort: 443
+        OriginProtocolPolicy: http-only
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${AWS::StackName} VS Code server"
+        Aliases: !If [HasDomain, [!Ref DomainName], !Ref "AWS::NoValue"]
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: !Ref PriceClass
+        ViewerCertificate: !If
+          - HasDomain
+          - { AcmCertificateArn: !Ref CertificateArn, SslSupportMethod: sni-only, MinimumProtocolVersion: TLSv1.2_2021 }
+          - { CloudFrontDefaultCertificate: true }
+        Origins:
+          - Id: code2-ec2
+            DomainName: !GetAtt Instance.PrivateDnsName
+            VpcOriginConfig:
+              VpcOriginId: !If [OriginSlotA, !GetAtt InstanceVpcOrigin.Id, !GetAtt InstanceVpcOriginB.Id]
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 5
+        DefaultCacheBehavior:
+          # No caching; all viewer headers and cookies forwarded (Host for code-server's WebSocket check).
+          TargetOriginId: code2-ec2
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad        # Managed-CachingDisabled
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # Managed-AllViewer
+
+  DnsA:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget: { DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FDTNDATAQYW2 }
+
+  DnsAAAA:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: AAAA
+      AliasTarget: { DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FDTNDATAQYW2 }
+
+Outputs:
+  Url:
+    Value: !Sub
+      - "https://${Host}"
+      - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+  # Ends the oauth2-proxy session, then Cognito's, and returns to sign-in.
+  LogoutUrl:
+    Value: !Sub
+      - "https://${Host}/oauth2/sign_out?rd=https%3A%2F%2F${AuthHost}%2Flogout%3Fclient_id%3D${UserPoolClient}%26logout_uri%3Dhttps%253A%252F%252F${Host}%252F"
+      - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+        AuthHost: !If [HasAuthDomain, !Ref AuthDomainName, !Sub "${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"]
+  InstanceId:
+    Value: !Ref Instance
+  InstancePrivateIp:
+    Value: !GetAtt Instance.PrivateIp
+  AvailabilityZone:
+    Value: !GetAtt Instance.AvailabilityZone
+  InstanceConnectEndpointId:
+    Value: !If [CreateEice, !Ref InstanceConnectEndpoint, !Ref ExistingEiceId]
+  UserPoolId:
+    Value: !Ref UserPool
+  DistributionId:
+    Value: !Ref Distribution
+  NatPublicIp:
+    Condition: CreateNetwork
+    Value: !Ref NatEip
+  DataVolumeId:
+    Value: !Ref DataVolume
+  LogGroupName:
+    Value: !Ref LogGroup
