@@ -11,7 +11,7 @@ Metadata:
         Parameters: [AdminUsername, AdminEmail, Mfa, PasswordMinLength, SessionHours]
       - Label: { default: Server }
         Parameters: [InstanceType, ImageId, RootVolumeSize, DataVolumeSize, DataSnapshotId, CodeServerVersion,
-                     OAuth2ProxyVersion, RemobiVersion, AutoUpdates, IdleStopHours]
+                     OAuth2ProxyVersion, RemobiVersion, AutoUpdates, AiTools, IdleStopHours]
       - Label: { default: Operations }
         Parameters: [BackupRetainCount, AlarmEmail, WaitForBoot, OriginSlot, SetupBucket]
       - Label: { default: Network (create-time) }
@@ -115,6 +115,13 @@ Parameters:
     Default: "true"
     AllowedValues: ["true", "false"]
     Description: Daily security updates with dnf-automatic, following the latest AL2023 release (no automatic reboot)
+  AiTools:
+    Type: String
+    Default: "off"
+    AllowedValues: ["on", "off"]
+    Description: >-
+      on: install Claude Code, Codex and their code-server extensions for ec2-user in /home (at the end of the next
+      setup run; off does not remove them)
   IdleStopHours:
     Type: Number
     Default: 0
@@ -495,7 +502,7 @@ Resources:
       Value: !Sub
         - >-
           {"code_server_version":"${CodeServerVersion}","oauth2_proxy_version":"${OAuth2ProxyVersion}",
-          "remobi_version":"${RemobiVersion}","auto_updates":"${AutoUpdates}","idle_hours":"${IdleStopHours}",
+          "remobi_version":"${RemobiVersion}","auto_updates":"${AutoUpdates}","ai_tools":"${AiTools}","idle_hours":"${IdleStopHours}",
           "session_hours":"${SessionHours}","vol":"${DataVolume}","user_pool":"${UserPool}",
           "cognito_host":"${CognitoHost}","log_group":"${LogGroup}"}
         # Not from UserPoolDomain (it waits for DnsA, which waits for the instance).

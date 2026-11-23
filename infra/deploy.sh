@@ -36,6 +36,7 @@ Settings (environment). Unset ones keep their current value on update; create-ti
                                CODE2_DOMAIN; empty goes back to the prefix domain)
   CODE2_AUTH_CERT_ARN          its certificate (default: an issued us-east-1 certificate covering it)
   CODE2_AUTO_UPDATES           true|false daily security updates (default true)
+  CODE2_AI_TOOLS               on|off install Claude Code and Codex for ec2-user (default off; off keeps installed ones)
   CODE2_IDLE_STOP_HOURS        stop after this many idle hours (default 0 = never)
   CODE2_BACKUP_COUNT           daily /home snapshots kept (default 7, 0 = off)
   CODE2_ALARM_EMAIL            CloudWatch alarm mails (default none)
@@ -143,7 +144,7 @@ keep() { PARAMS=$(jq -c --arg k "$1" '. + [{ParameterKey: $k, UsePreviousValue: 
 # ParameterKey:ENV pairs that may change after create.
 TUNABLES="InstanceType:CODE2_INSTANCE_TYPE DataVolumeSize:CODE2_DATA_SIZE RootVolumeSize:CODE2_ROOT_SIZE
   CodeServerVersion:CODE2_CODE_SERVER_VERSION OAuth2ProxyVersion:CODE2_OAUTH2_PROXY_VERSION RemobiVersion:CODE2_REMOBI_VERSION
-  SessionHours:CODE2_SESSION_HOURS Mfa:CODE2_MFA PasswordMinLength:CODE2_PASSWORD_MIN_LENGTH AutoUpdates:CODE2_AUTO_UPDATES IdleStopHours:CODE2_IDLE_STOP_HOURS
+  SessionHours:CODE2_SESSION_HOURS Mfa:CODE2_MFA PasswordMinLength:CODE2_PASSWORD_MIN_LENGTH AutoUpdates:CODE2_AUTO_UPDATES AiTools:CODE2_AI_TOOLS IdleStopHours:CODE2_IDLE_STOP_HOURS
   BackupRetainCount:CODE2_BACKUP_COUNT AlarmEmail:CODE2_ALARM_EMAIL PriceClass:CODE2_PRICE_CLASS
   AdminUsername:CODE2_ADMIN_USER AdminEmail:CODE2_ADMIN_EMAIL"
 # Fixed after create (network, edge, the volume's source, the boot signal).

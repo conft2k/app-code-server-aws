@@ -32,9 +32,9 @@ trap 'fail "line $LINENO exited $?"' ERR
 
 # Stack settings (SetupConfig in code2.yaml); only these names are taken from the parameter. A new name needs a
 # default here: the stack may still hold an older parameter (reconfigure before apply, or a rolled-back update).
-code_server_version='' oauth2_proxy_version='' remobi_version=1.2.1 auto_updates='' idle_hours=''
+code_server_version='' oauth2_proxy_version='' remobi_version=1.2.1 auto_updates='' ai_tools=off idle_hours=''
 session_hours='' vol='' user_pool='' cognito_host='' log_group=''
-settings="code_server_version oauth2_proxy_version remobi_version auto_updates idle_hours session_hours vol user_pool
+settings="code_server_version oauth2_proxy_version remobi_version auto_updates ai_tools idle_hours session_hours vol user_pool
   cognito_host log_group"
 cfg=$(retry aws ssm get-parameter --region "$region" --name "/$stack/setup" --query Parameter.Value --output text)
 # shellcheck disable=SC2086
@@ -417,13 +417,14 @@ rm -rf "$work"
 log "done"
 signal SUCCESS "code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, remobi ${remobi_version} running"
 
-# ---- Claude Code and Codex for ec2-user: CLIs and code-server extensions ----
+# ---- Claude Code and Codex for ec2-user: CLIs and code-server extensions (only with ai_tools=on) ----
 # Last, after the BootWait signal: they are optional, and their downloads must not hold up the services or the
 # stack. Installed into /home, so they outlive an instance replacement and keep their own updates (Claude Code
 # updates itself, Codex with npm, the extensions in code-server). A CLI is removed and installed again only when it
 # does not run: missing, half installed, or built for the other architecture after an instance type change. An
 # extension is installed only when missing (README: changing the architecture). All steps share a 15-minute
 # budget (timeout stops the whole process group), and a failure only warns; the next run retries.
+if [ "$ai_tools" != on ]; then log "AI tools: off (CODE2_AI_TOOLS), skipping"; exit 0; fi
 uhome=/home/ec2-user ai_deadline=$((SECONDS + 900))
 as_user() {   # as_user <seconds> <command...>: as ec2-user, stopped after <seconds> or when the budget runs out
   local cap=$1 left=$((ai_deadline - SECONDS)); shift

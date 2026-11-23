@@ -25,6 +25,7 @@ export CODE2_ADMIN_EMAIL=you@example.com      # 임시 암호를 받을 메일
 # export CODE2_ADMIN_USER=alice               # 로그인 이름 (기본 admin)
 # export CODE2_DOMAIN=code.example.com        # 선택: 내 도메인 (아래 "내 도메인 쓰기")
 # export CODE2_MFA=off                        # 선택: TOTP 없이 암호만 (기본 on)
+# export CODE2_AI_TOOLS=on                    # 선택: Claude Code, Codex 설치 (기본 off)
 # export CODE2_ALARM_EMAIL=you@example.com    # 선택: 장애 알림 메일 (아래 "모니터링")
 
 infra/deploy.sh stack plan     # 사전 점검 후 변경 세트만 만들고 내용을 보여 줍니다
@@ -121,7 +122,7 @@ Cognito 로그인 페이지도 내 도메인으로 바꿀 수 있습니다(기�
 
 `git`, `python3` (+ `pip`), `gcc`, `gcc-c++`, `make`, `tmux`, `jq`, AWS CLI v2, Node.js 22(`nodejs22`, `node`·`npm`). remobi가 쓰려고 설치하지만, remobi는 `node-22`를 직접 부르므로 다른 Node.js 버전을 기본으로 바꿔도 됩니다. **Docker는 설치되어 있지 않습니다.**
 
-AI 코딩 도구도 `ec2-user`의 `/home`에 설치합니다. setup.sh는 CLI가 없거나 실행되지 않을 때(`--version` 실패, 예: 설치가 덜 됐거나 인스턴스 타입을 바꿔 아키텍처가 달라졌을 때)만 그 CLI를 지우고 다시 설치합니다. 버전은 Claude Code는 설정한 업데이트 채널(기본 `latest`)의 최신 버전, Codex는 npm의 최신 버전입니다. 설정(`~/.claude`, `~/.codex`)은 그대로 둡니다. 확장은 없을 때만 설치합니다. 실행되는 도구는 건드리지 않으므로, 인스턴스를 교체해도 쓰던 버전과 설정이 남고 업데이트는 각 도구가 합니다. 이 설치는 서비스가 모두 뜨고 스택에 성공을 알린 뒤 맨 마지막에, 모두 합쳐 최대 15분 동안 합니다. 설치에 실패하거나 시간이 모자라면 경고만 남기고, 다음 setup 실행(재부팅, `reconfigure`) 때 다시 설치합니다. 로그인과 모델 설정(예: Bedrock)은 직접 합니다.
+AI 코딩 도구(Claude Code, Codex)는 `CODE2_AI_TOOLS=on`일 때만 `ec2-user`의 `/home`에 설치합니다(기본 `off`: 설치하지 않습니다). `off`로 되돌려도 이미 설치한 도구는 지우지 않습니다. 켜면 setup.sh는 CLI가 없거나 실행되지 않을 때(`--version` 실패, 예: 설치가 덜 됐거나 인스턴스 타입을 바꿔 아키텍처가 달라졌을 때)만 그 CLI를 지우고 다시 설치합니다. 버전은 Claude Code는 설정한 업데이트 채널(기본 `latest`)의 최신 버전, Codex는 npm의 최신 버전입니다. 설정(`~/.claude`, `~/.codex`)은 그대로 둡니다. 확장은 없을 때만 설치합니다. 실행되는 도구는 건드리지 않으므로, 인스턴스를 교체해도 쓰던 버전과 설정이 남고 업데이트는 각 도구가 합니다. 이 설치는 서비스가 모두 뜨고 스택에 성공을 알린 뒤 맨 마지막에, 모두 합쳐 최대 15분 동안 합니다. 설치에 실패하거나 시간이 모자라면 경고만 남기고, 다음 setup 실행(재부팅, `reconfigure`) 때 다시 설치합니다. 로그인과 모델 설정(예: Bedrock)은 직접 합니다.
 
 아키텍처가 다른 인스턴스 타입(예: `t4g` ↔ `t3`)으로 바꾸면 확장은 자동으로 다시 설치되지 않습니다. 새 인스턴스에서 `code-server --uninstall-extension anthropic.claude-code`, `code-server --uninstall-extension openai.chatgpt`로 지운 뒤 `reconfigure`를 실행하면, 그 아키텍처용으로 다시 설치합니다.
 
@@ -185,6 +186,7 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 | `CODE2_SESSION_HOURS` | `12` | 언제든 | 로그인 유지 시간(1–168) |
 | `CODE2_MFA` | `on` | 언제든 | `on`: 첫 로그인 때 TOTP를 등록하고 매번 코드를 입력합니다. `off`: 암호만. 나중에 `on`으로 바꾸면 사용자는 다음 로그인 때 TOTP를 등록합니다. Cognito의 OPTIONAL은 관리형 로그인이 TOTP 등록 화면을 띄우지 않아 넣지 않았습니다 |
 | `CODE2_AUTO_UPDATES` | `true` | 언제든 | 매일 보안 업데이트 |
+| `CODE2_AI_TOOLS` | `off` | 언제든 | `on`: Claude Code, Codex CLI와 code-server 확장을 `ec2-user`의 `/home`에 설치합니다(위 "기본 설치 도구"). 적용하면 `reconfigure`가 바로 설치하고, `off`로 바꿔도 설치된 도구는 지우지 않습니다 |
 | `CODE2_IDLE_STOP_HOURS` | `0` (끔) | 언제든 | 유휴 상태가 이 시간만큼 이어지면 인스턴스 중지(아래 "유휴 중지") |
 | `CODE2_BACKUP_COUNT` | `7` | 언제든 | 보관할 일일 `/home` 스냅샷 수. `0`이면 백업 끔 |
 | `CODE2_ALARM_EMAIL` | 없음 | 언제든 | CloudWatch 알람 메일. 빈 값으로 지정하면 알람을 지웁니다 |
