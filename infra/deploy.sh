@@ -18,8 +18,8 @@ infra/deploy.sh <command>
   destroy             delete the stack, then list what it leaves behind (user pool, snapshots)
 
 Settings (environment). Unset ones keep their current value on update; create-time ones are fixed after create.
-  CODE2_ADMIN_EMAIL            required on create: where Cognito sends the temporary password
-  CODE2_ADMIN_USER             sign-in name (default admin; a new name recreates the user)
+  CODE2_ADMIN_EMAIL            required on create: the sign-in email, where Cognito sends the temporary password
+                               (a new address recreates the user)
   CODE2_STACK                  stack name, lowercase (default code2)
   CODE2_ACCOUNT                refuse to run with credentials for any other account
   AWS_REGION                   default: AWS_DEFAULT_REGION, the profile's region, then ap-northeast-2
@@ -140,7 +140,7 @@ TUNABLES="InstanceType:CODE2_INSTANCE_TYPE DataVolumeSize:CODE2_DATA_SIZE RootVo
   CodeServerVersion:CODE2_CODE_SERVER_VERSION OAuth2ProxyVersion:CODE2_OAUTH2_PROXY_VERSION RemobiVersion:CODE2_REMOBI_VERSION
   SessionHours:CODE2_SESSION_HOURS Mfa:CODE2_MFA PasswordMinLength:CODE2_PASSWORD_MIN_LENGTH AutoUpdates:CODE2_AUTO_UPDATES AiTools:CODE2_AI_TOOLS IdleStopHours:CODE2_IDLE_STOP_HOURS
   BackupRetainCount:CODE2_BACKUP_COUNT AlarmEmail:CODE2_ALARM_EMAIL PriceClass:CODE2_PRICE_CLASS
-  AdminUsername:CODE2_ADMIN_USER AdminEmail:CODE2_ADMIN_EMAIL"
+  AdminEmail:CODE2_ADMIN_EMAIL"
 # Fixed after create (network, the volume's source, the boot signal).
 CREATE_ONLY="AvailabilityZone VpcCidr PublicSubnetCidr PrivateSubnetCidr DataSnapshotId WaitForBoot"
 

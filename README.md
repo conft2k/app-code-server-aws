@@ -18,11 +18,10 @@ CloudFront → private EC2(Graviton) → code-server · 휴대폰 터미널(remo
 필요한 것: AWS 계정, AWS CLI v2, `jq`, 관리자 수준 자격 증명(VPC, EC2, IAM, CloudFront, Cognito, SSM, CloudWatch, DLM을 만듭니다). SSH와 Session Manager를 쓰려면 [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)도 설치합니다.
 
 ```bash
-git clone https://github.com/conft2k/app-code2.git && cd app-code2
+git clone https://github.com/conft2k/app-code-server-aws.git && cd app-code-server-aws
 
 export AWS_REGION=ap-northeast-2              # 원하는 리전
-export CODE2_ADMIN_EMAIL=you@example.com      # 임시 암호를 받을 메일
-# export CODE2_ADMIN_USER=alice               # 로그인 이름 (기본 admin)
+export CODE2_ADMIN_EMAIL=you@example.com      # 로그인 메일 (임시 암호도 이 주소로 옵니다)
 # export CODE2_MFA=off                        # 선택: TOTP 없이 암호만 (기본 on)
 # export CODE2_AI_TOOLS=on                    # 선택: Claude Code, Codex 설치 (기본 off)
 # export CODE2_ALARM_EMAIL=you@example.com    # 선택: 장애 알림 메일 (아래 "모니터링")
@@ -33,7 +32,7 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active active �
 ```
 
 1. `CODE2_ADMIN_EMAIL`로 임시 암호가 옵니다(7일 유효).
-2. `status`에 나온 CloudFront 주소(`url`)에 접속해 임시 암호로 로그인합니다.
+2. `status`에 나온 CloudFront 주소(`url`)에 접속해 `CODE2_ADMIN_EMAIL` 주소와 임시 암호로 로그인합니다.
 3. 새 암호(기본 12자 이상, `CODE2_PASSWORD_MIN_LENGTH`)를 정하고 인증 앱(Google Authenticator, 1Password 등)에 TOTP를 등록합니다(`CODE2_MFA=off`면 암호만 정합니다).
 
 `stack apply`는 인스턴스가 code-server, remobi, oauth2-proxy를 다 띄웠다고 알려 올 때까지 기다립니다. 설정이 실패하면(다운로드 실패, Cognito 설정 오류 등) 스택이 롤백되고, 실패한 줄과 로그 끝부분이 `BootWait` 이벤트 사유에 나옵니다. 원인을 인스턴스에서 직접 보려면 `CODE2_KEEP_ON_FAILURE=1 infra/deploy.sh stack apply`로 롤백 없이 실행합니다.
@@ -133,7 +132,7 @@ AI 코딩 도구(Claude Code, Codex)는 `CODE2_AI_TOOLS=on`일 때만 `ec2-user`
 | 방법 | 방법 |
 |---|---|
 | 브라우저 | `infra/deploy.sh status`의 URL에서 로그인. 터미널은 `` Ctrl+` ``. 로그아웃은 `status`의 logout 주소 |
-| 브라우저 터미널 | `<URL>/r/`에서 에디터 없이 터미널만 엽니다(로그인은 code-server와 같은 세션). 휴대폰에 맞춘 [remobi](https://github.com/connorads/remobi)이고, tmux 세션 `admin`에 붙으므로 창을 닫았다 열어도 작업이 이어지고, SSH에서는 `tmux attach -t admin`으로 같은 화면을 봅니다. 터치 툴바(Esc, Prefix 등)와 명령 서랍이 있고, 좌우로 밀면 tmux 창이 바뀌고 두 손가락으로 글자 크기를 바꿉니다. 브라우저 메뉴의 "홈 화면에 추가"로 앱처럼 쓸 수 있습니다. 이때 상태 표시줄은 불투명(`black`)이라 터미널이 그 아래에서 시작합니다. iPad는 이 설정을 추가할 때 저장하므로, 상태 표시줄이 반투명(`black-translucent`)이던 이전 setup.sh 때 추가한 아이콘에서 윗줄이 상태 표시줄에 가려지면 아이콘을 지우고 다시 추가합니다. 툴바는 한 줄(Esc, Prefix, Tab, 방향키, C-c, ☰)이고 나머지 키(Paste, ⏎, ⌫, Space, S-Tab, C-d 등)와 tmux 명령은 ☰ 서랍에 있습니다. 툴바 두께와 버튼 크기(높이 40px, 폭 60px, 좁은 화면에서는 폭이 줄어듦)는 remobi에 스타일 설정이 없어서 setup.sh가 remobi의 `client.css` 뒤에 `/etc/remobi/compact.css`를 덧붙여 정합니다. 이 배치는 setup.sh가 `/etc/remobi/remobi.config.mjs`로 관리하고, 버튼과 제스처를 더 바꾸려면 `/etc/remobi/remobi.config.local.mjs`에 덮어쓸 값만 적은 뒤 `sudo systemctl restart remobi` 합니다 |
+| 브라우저 터미널 | `<URL>/r/`에서 에디터 없이 터미널만 엽니다(로그인은 code-server와 같은 세션). 휴대폰에 맞춘 [remobi](https://github.com/connorads/remobi)이고, tmux 세션 `admin`에 붙으므로 창을 닫았다 열어도 작업이 이어지고, SSH에서는 `tmux attach -t admin`으로 같은 화면을 봅니다. 터치 툴바(Esc, Prefix 등)와 명령 서랍이 있고, 좌우로 밀면 tmux 창이 바뀌고 두 손가락으로 글자 크기를 바꿉니다. 브라우저 메뉴의 "홈 화면에 추가"로 앱처럼 쓸 수 있습니다. 이때 상태 표시줄은 불투명(`black`)이라 터미널이 그 아래에서 시작합니다. 툴바는 한 줄(Esc, Prefix, Tab, 방향키, C-c, ☰)이고 나머지 키(Paste, ⏎, ⌫, Space, S-Tab, C-d 등)와 tmux 명령은 ☰ 서랍에 있습니다. 툴바 두께와 버튼 크기(높이 40px, 폭 60px, 좁은 화면에서는 폭이 줄어듦)는 remobi에 스타일 설정이 없어서 setup.sh가 remobi의 `client.css` 뒤에 `/etc/remobi/compact.css`를 덧붙여 정합니다. 이 배치는 setup.sh가 `/etc/remobi/remobi.config.mjs`로 관리하고, 버튼과 제스처를 더 바꾸려면 `/etc/remobi/remobi.config.local.mjs`에 덮어쓸 값만 적은 뒤 `sudo systemctl restart remobi` 합니다 |
 | 개발 서버 미리 보기 | 인스턴스에서 띄운 웹 서버는 `<URL>/proxy/<포트>/` 로 엽니다(로그인 필요). 경로 접두사를 그대로 넘기려면 `/absproxy/<포트>/` 를 씁니다 |
 | SSH | `infra/deploy.sh ssh` |
 | VS Code Remote-SSH | `infra/deploy.sh ssh-config`가 출력하는 블록을 `~/.ssh/config`에 붙이고, 접속 전에 같은 출력에 있는 `send-ssh-public-key` 명령으로 키를 넣습니다 |
@@ -162,8 +161,7 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 
 | 변수 | 기본값 | 언제 바꿀 수 있나 | 설명 |
 |---|---|---|---|
-| `CODE2_ADMIN_EMAIL` | (필수, 첫 배포) | 언제든 | 임시 암호를 받을 메일 |
-| `CODE2_ADMIN_USER` | `admin` | 언제든 | 로그인 이름. 바꾸면 사용자를 새로 만듭니다(아래 "계정") |
+| `CODE2_ADMIN_EMAIL` | (필수, 첫 배포) | 언제든 | 로그인 메일이자 임시 암호를 받을 주소(템플릿 파라미터 `AdminEmail`). 바꾸면 사용자를 새로 만듭니다(아래 "계정") |
 | `CODE2_STACK` | `code2` | – | 스택 이름(소문자·숫자·하이픈, 50자 이하, `aws`/`amazon`/`cognito` 포함 불가: Cognito 도메인 접두사로 쓰입니다). 이름을 달리하면 한 계정에 여러 대를 만들 수 있습니다 |
 | `CODE2_ACCOUNT` | 없음 | – | 지정하면 다른 계정의 자격 증명으로는 실행하지 않습니다 |
 | `AWS_REGION` | `AWS_DEFAULT_REGION` → 프로필 리전 → `ap-northeast-2` | – | 배포 리전 |
@@ -244,7 +242,7 @@ CODE2_UPDATE_AMI=1 infra/deploy.sh stack plan   # 최신 AL2023으로 교체
 ### 계정
 
 ```bash
-aws cognito-idp admin-create-user --user-pool-id <UserPoolId> --username <이름> \
+aws cognito-idp admin-create-user --user-pool-id <UserPoolId> --username <메일> \
   --user-attributes Name=email,Value=<메일> Name=email_verified,Value=true
 ```
 
@@ -253,12 +251,12 @@ aws cognito-idp admin-create-user --user-pool-id <UserPoolId> --username <이름
 암호를 잊었으면 로그인 페이지의 **Forgot your password?**에서 등록된 메일로 코드를 받아 재설정합니다. 첫 로그인 전(`FORCE_CHANGE_PASSWORD`)에는 재설정이 안 되므로, 초대 메일을 다시 보냅니다(새 임시 암호가 발급되고 이전 것은 무효가 됩니다).
 
 ```bash
-aws cognito-idp admin-create-user --user-pool-id <UserPoolId> --username <이름> --message-action RESEND
+aws cognito-idp admin-create-user --user-pool-id <UserPoolId> --username <메일> --message-action RESEND
 ```
 
 메일은 Cognito 기본 발신자(`no-reply@verificationemail.com`)로 오며 스팸함으로 갈 수 있습니다. 하루 발송 한도는 50통입니다.
 
-`CODE2_ADMIN_USER`를 바꾸고 `stack plan`/`apply`를 하면, Cognito는 사용자 이름을 바꿀 수 없으므로 사용자를 새로 만들고(임시 암호 재발송, TOTP 재등록) 이전 사용자는 삭제합니다. 업데이트할 때 `CODE2_ADMIN_USER`를 지정하지 않으면 현재 이름을 그대로 씁니다.
+로그인 이름은 메일 주소입니다(사용자 풀의 `UsernameAttributes: email`, 대소문자 구분 없음). `CODE2_ADMIN_EMAIL`을 바꾸고 `stack plan`/`apply`를 하면, Cognito는 사용자 이름을 바꿀 수 없으므로 새 메일로 사용자를 새로 만들고(임시 암호 재발송, TOTP 재등록) 이전 사용자는 삭제합니다. 업데이트할 때 `CODE2_ADMIN_EMAIL`을 지정하지 않으면 현재 주소를 그대로 씁니다.
 
 ### 인스턴스에서 직접 확인
 

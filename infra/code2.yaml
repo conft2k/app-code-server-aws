@@ -8,7 +8,7 @@ Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label: { default: Sign-in }
-        Parameters: [AdminUsername, AdminEmail, Mfa, PasswordMinLength, SessionHours]
+        Parameters: [AdminEmail, Mfa, PasswordMinLength, SessionHours]
       - Label: { default: Server }
         Parameters: [InstanceType, ImageId, RootVolumeSize, DataVolumeSize, DataSnapshotId, CodeServerVersion,
                      OAuth2ProxyVersion, RemobiVersion, AutoUpdates, AiTools, IdleStopHours]
@@ -152,15 +152,12 @@ Parameters:
     Type: String
     AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
     Description: S3 bucket deploy.sh uploads infra/setup.sh to (<bucket>/<stack>/setup.sh); the instance runs it at boot
-  AdminUsername:
-    Type: String
-    Default: admin
-    AllowedPattern: '^[a-zA-Z0-9._-]+$'
-    Description: The account Cognito creates and emails a temporary password to
   AdminEmail:
     Type: String
     AllowedPattern: "^[^@\\s]+@[^@\\s]+$"
-    Description: Where the temporary password goes
+    Description: >-
+      Sign-in name of the account Cognito creates (users sign in with their email) and where the temporary password
+      goes; a new address replaces the user
 
 Conditions:
   HasAz: !Not [!Equals [!Ref AvailabilityZone, ""]]
@@ -330,7 +327,7 @@ Resources:
       UserPoolName: !Sub "${AWS::StackName}-users"
       UserPoolTier: ESSENTIALS
       DeletionProtection: ACTIVE
-      AliasAttributes: [email]
+      UsernameAttributes: [email]       # the email is the sign-in name
       AutoVerifiedAttributes: [email]
       UsernameConfiguration: { CaseSensitive: false }
       # A sudo shell sits behind this login.
@@ -344,7 +341,7 @@ Resources:
           EmailMessage: !Sub
             - >-
               code2 (VS Code) 계정입니다.<br><br>
-              사용자 이름: {username}<br>임시 암호: {####}<br><br>
+              로그인 메일: {username}<br>임시 암호: {####}<br><br>
               ${Where}에 접속해 위 정보로 로그인한 뒤 ${Setup} 임시 암호는 7일 동안 쓸 수 있습니다.
             - Where: "code2 주소(infra/deploy.sh status 의 url)"
               Setup: !If [MfaOn, "새 암호와 인증 앱(TOTP)을 등록해 주세요.", "새 암호를 정해 주세요."]
@@ -407,9 +404,8 @@ Resources:
     Type: AWS::Cognito::UserPoolUser
     Properties:
       UserPoolId: !Ref UserPool
-      Username: !Ref AdminUsername
+      Username: !Ref AdminEmail
       DesiredDeliveryMediums: [EMAIL]
-      ForceAliasCreation: true          # a replaced user takes the email alias over from the old one
       UserAttributes:
         - { Name: email, Value: !Ref AdminEmail }
         - { Name: email_verified, Value: "true" }
