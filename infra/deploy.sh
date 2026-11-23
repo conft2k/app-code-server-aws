@@ -47,7 +47,6 @@ Settings (environment). Unset ones keep their current value on update; create-ti
   CODE2_ZONE / CODE2_ZONE_ID   hosted zone name or id of CODE2_DOMAIN (default: found from the domain)
   CODE2_CERT_ARN               certificate (default: an issued us-east-1 certificate covering CODE2_DOMAIN)
   CODE2_AZ                     AZ (default: the first one offering the instance type)
-  CODE2_VPC_ID, CODE2_SUBNET_ID  use an existing VPC and private subnet (with NAT egress) instead of a new VPC
   CODE2_RESTORE_SNAPSHOT       snap-... to create /home from (a snapshot of an earlier code2 /home)
 EOF
   exit 2
@@ -148,8 +147,7 @@ TUNABLES="InstanceType:CODE2_INSTANCE_TYPE DataVolumeSize:CODE2_DATA_SIZE RootVo
   BackupRetainCount:CODE2_BACKUP_COUNT AlarmEmail:CODE2_ALARM_EMAIL PriceClass:CODE2_PRICE_CLASS
   AdminUsername:CODE2_ADMIN_USER AdminEmail:CODE2_ADMIN_EMAIL"
 # Fixed after create (network, edge, the volume's source, the boot signal).
-CREATE_ONLY="AvailabilityZone VpcCidr PublicSubnetCidr PrivateSubnetCidr ExistingVpcId ExistingSubnetId ExistingEiceId
-  ExistingEiceSecurityGroupId DomainName HostedZoneId CertificateArn DataSnapshotId WaitForBoot"
+CREATE_ONLY="AvailabilityZone VpcCidr PublicSubnetCidr PrivateSubnetCidr DomainName HostedZoneId CertificateArn DataSnapshotId WaitForBoot"
 
 arch_of() { aws ec2 describe-instance-types --instance-types "$1" --query 'InstanceTypes[0].ProcessorInfo.SupportedArchitectures' \
   --output text 2>/dev/null | tr '\t' '\n' | grep -E '^(arm64|x86_64)$' | head -1 || true; }
@@ -223,16 +221,14 @@ preflight_create() {
     --output text | grep -q "$type" || die "$type is not offered in $az (set CODE2_AZ or CODE2_INSTANCE_TYPE)"
   n=$(aws ec2 describe-instance-connect-endpoints --query 'length(InstanceConnectEndpoints)' --output text 2>/dev/null || echo 0)
   [ "$n" -lt 5 ] || warn "$n EC2 Instance Connect Endpoints in $AWS_REGION already (default quota 5)"
-  if [ -z "${CODE2_VPC_ID:-}" ]; then
-    n=$(aws ec2 describe-vpcs --query 'length(Vpcs)' --output text)
-    [ "$n" -lt 5 ] || warn "$n VPCs in $AWS_REGION already (default quota 5)"
-    n=$(aws ec2 describe-addresses --query 'length(Addresses)' --output text)
-    [ "$n" -lt 5 ] || warn "$n Elastic IPs in $AWS_REGION already (default quota 5)"
-  fi
+  n=$(aws ec2 describe-vpcs --query 'length(Vpcs)' --output text)
+  [ "$n" -lt 5 ] || warn "$n VPCs in $AWS_REGION already (default quota 5)"
+  n=$(aws ec2 describe-addresses --query 'length(Addresses)' --output text)
+  [ "$n" -lt 5 ] || warn "$n Elastic IPs in $AWS_REGION already (default quota 5)"
 }
 
 params_create() {
-  local type=${CODE2_INSTANCE_TYPE:-t4g.medium} arch ami az="${CODE2_AZ:-}" pair k v vpc eice zone cert pl
+  local type=${CODE2_INSTANCE_TYPE:-t4g.medium} arch ami az="${CODE2_AZ:-}" pair k v zone cert pl
   [ -n "${CODE2_ADMIN_EMAIL:-}" ] || die "set CODE2_ADMIN_EMAIL (the temporary password goes there)"
   arch=$(arch_of "$type"); [ -n "$arch" ] || die "unknown instance type $type in $AWS_REGION"
   check_nitro "$type"
@@ -240,24 +236,7 @@ params_create() {
   pl=$(prefix_list); param CloudFrontPrefixListId "$pl"
   param SetupBucket "$BUCKET"
 
-  if [ -n "${CODE2_VPC_ID:-}" ]; then
-    vpc=$CODE2_VPC_ID
-    [ -n "${CODE2_SUBNET_ID:-}" ] || die "CODE2_VPC_ID needs CODE2_SUBNET_ID (a private subnet with NAT egress)"
-    read -r v az < <(aws ec2 describe-subnets --subnet-ids "$CODE2_SUBNET_ID" --query 'Subnets[0].[VpcId,AvailabilityZone]' --output text)
-    [ "$v" = "$vpc" ] || die "$CODE2_SUBNET_ID is in $v, not $vpc"
-    aws ec2 describe-internet-gateways --filters "Name=attachment.vpc-id,Values=$vpc" --query 'InternetGateways[0].InternetGatewayId' \
-      --output text | grep -q '^igw-' || die "$vpc has no internet gateway (CloudFront VPC origins need one)"
-    aws ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$CODE2_SUBNET_ID" \
-      --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].NatGatewayId' --output text | grep -q '^nat-' \
-      || warn "$CODE2_SUBNET_ID has no 0.0.0.0/0 route to a NAT gateway in its own route table; the instance needs internet egress"
-    param ExistingVpcId "$vpc"; param ExistingSubnetId "$CODE2_SUBNET_ID"
-    read -r eice v < <(aws ec2 describe-instance-connect-endpoints --filters "Name=vpc-id,Values=$vpc" \
-      --query 'InstanceConnectEndpoints[0].[InstanceConnectEndpointId,SecurityGroupIds[0]]' --output text)
-    if [[ "$eice" == eice-* ]]; then
-      echo "using the VPC's EC2 Instance Connect Endpoint $eice ($v)"
-      param ExistingEiceId "$eice"; param ExistingEiceSecurityGroupId "$v"
-    fi
-  elif [ -z "$az" ]; then
+  if [ -z "$az" ]; then
     az=$(aws ec2 describe-instance-type-offerings --location-type availability-zone \
       --filters "Name=instance-type,Values=$type" --query 'InstanceTypeOfferings[].Location' --output text | tr '\t' '\n' | sort | head -1)
     [ -n "$az" ] || die "$type is not offered in any AZ of $AWS_REGION"
@@ -299,7 +278,7 @@ params_update() {
   done
   if has OriginSlot; then keep OriginSlot; fi
   if has AuthDomainName; then auth_domain_params keep; else auth_domain_params; fi
-  for v in CODE2_DOMAIN CODE2_AZ CODE2_VPC_ID CODE2_SUBNET_ID CODE2_RESTORE_SNAPSHOT; do
+  for v in CODE2_DOMAIN CODE2_AZ CODE2_RESTORE_SNAPSHOT; do
     [ -z "${!v:-}" ] || warn "$v only applies when the stack is created; ignored"
   done
 

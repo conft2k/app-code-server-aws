@@ -7,7 +7,7 @@ CloudFront → private EC2(Graviton) → code-server · 휴대폰 터미널(remo
 
 ## 한눈에 보기
 
-- CloudFormation 스택 하나로 **전용 VPC, private EC2, CloudFront, Cognito 로그인**이 모두 만들어집니다. 미리 준비할 네트워크나 리소스는 없습니다. 이미 있는 VPC에 넣을 수도 있습니다.
+- CloudFormation 스택 하나로 **전용 VPC, private EC2, CloudFront, Cognito 로그인**이 모두 만들어집니다. 미리 준비할 네트워크나 리소스는 없습니다.
 - 배포가 끝나면 받은 URL에 접속해 Cognito로 로그인(암호 + TOTP, `CODE2_MFA=off`면 암호만)합니다. 로그인하면 바로 VS Code가 열립니다. 같은 로그인으로 `<URL>/r/`에서 휴대폰에 맞춘 터미널([remobi](https://github.com/connorads/remobi))도 씁니다.
 - 서버는 공인 IP가 없는 private 서브넷의 EC2(기본 `t4g.medium`, 2 vCPU / 4 GiB, 다른 Graviton·x86 Nitro 타입도 가능)입니다. 외부에서 들어오는 길은 **CloudFront(HTTPS)** 와 **EC2 Instance Connect Endpoint(SSH, IAM 인증)** 두 가지뿐입니다.
 - 작업 공간(`/home`)은 별도 EBS 볼륨에 있어서 인스턴스를 바꿔도 남습니다. 매일 스냅샷으로 백업합니다.
@@ -49,20 +49,6 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active active �
 도메인은 처음 만들 때 정합니다. 나중에 바꾸면 Cognito 콜백 주소와 인스턴스 설정이 어긋나므로, 스택을 새로 만드는 편이 안전합니다.
 
 Cognito 로그인 페이지도 내 도메인으로 바꿀 수 있습니다(기본은 `<스택>-<계정>.auth.<리전>.amazoncognito.com`). `CODE2_AUTH_DOMAIN=auth.code.example.com`처럼 `CODE2_DOMAIN` 아래 이름을 지정하면, 스크립트가 그 이름을 덮는 us-east-1 인증서(`CODE2_AUTH_CERT_ARN`로 지정 가능)를 찾아 넣고 A/AAAA 레코드를 만듭니다. Cognito는 상위 이름(`code.example.com`)의 A 레코드가 있어야 커스텀 도메인을 만들 수 있어서, 사이트 레코드가 생긴 뒤에 만들어집니다. 생성 후에도 켜고 끌 수 있습니다(도메인이 교체되고 인스턴스 재시작 없이 oauth2-proxy만 다시 시작되며, 그동안 로그인이 잠시 안 될 수 있습니다).
-
-### 이미 있는 VPC 쓰기 (선택)
-
-새 VPC와 NAT Gateway 대신 기존 네트워크에 넣으려면, 첫 `stack plan` 전에 지정합니다.
-
-```bash
-export CODE2_VPC_ID=vpc-0123...           # 인터넷 게이트웨이가 붙어 있어야 합니다 (CloudFront VPC origin 요건)
-export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT 경로 필요
-```
-
-- 스크립트가 서브넷의 AZ, VPC CIDR, 인터넷 게이트웨이, NAT 경로를 확인합니다.
-- 그 VPC에 EC2 Instance Connect Endpoint가 이미 있으면 그것을 씁니다(VPC당 하나). 스택이 그 엔드포인트의 보안 그룹에 인스턴스로 나가는 22번 egress 규칙을 추가합니다(스택을 지우면 규칙도 지워집니다).
-- 인스턴스의 `:80`은 CloudFront origin-facing 관리형 prefix list에서만 열리므로, 같은 VPC의 다른 워크로드는 닿을 수 없습니다.
-- NAT Gateway와 공인 IPv4 요금(월 약 $46)이 들지 않습니다.
 
 ## 동작 아키텍처
 
@@ -210,7 +196,6 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 | `CODE2_AUTH_DOMAIN`, `CODE2_AUTH_CERT_ARN` | 없음 | 언제든 | Cognito 로그인 페이지 도메인(위 "내 도메인 쓰기"). 빈 값으로 지정하면 기본 도메인으로 돌아갑니다 |
 | `CODE2_DOMAIN`, `CODE2_ZONE`, `CODE2_ZONE_ID`, `CODE2_CERT_ARN` | 없음 | 생성 때만 | 내 도메인 |
 | `CODE2_AZ` | 인스턴스 타입을 제공하는 첫 AZ | 생성 때만 | 인스턴스와 `/home`의 AZ |
-| `CODE2_VPC_ID`, `CODE2_SUBNET_ID` | 없음 | 생성 때만 | 기존 VPC 사용 |
 | `CODE2_RESTORE_SNAPSHOT` | 없음 | 생성 때만 | 이 스냅샷으로 `/home`을 만듭니다(아래 "백업과 복구") |
 
 예: 인스턴스를 키우고 code-server를 올리기
@@ -344,7 +329,7 @@ code2/
 │   ├── architecture.png         README 구성도
 │   └── architecture.svg         구성도 원본 (아이콘 포함, 브라우저·Inkscape·draw.io에서 편집)
 └── infra/
-    ├── code2.yaml               CloudFormation: VPC·NAT·EICE(또는 기존 VPC), Cognito, EC2·EBS, CloudFront VPC origin,
+    ├── code2.yaml               CloudFormation: VPC·NAT·EICE, Cognito, EC2·EBS, CloudFront VPC origin,
     │                            CloudWatch 로그·알람, DLM 백업, (선택) Route 53
     ├── setup.sh                 인스턴스 설정 스크립트: /home, code-server, remobi, oauth2-proxy, CloudWatch, 업데이트, 유휴 중지
     ├── deploy.sh                plan/apply(사전 점검·이관 포함), status, logs, reconfigure, ssh, shell, stop/start, destroy
@@ -367,7 +352,6 @@ code2/
 | **합계** | **약 $87–90** |
 
 - 인스턴스를 중지하면 EC2 요금(약 $30)은 나가지 않지만, NAT Gateway·IPv4·EBS 요금은 계속 나갑니다.
-- 기존 VPC를 쓰면 NAT와 IPv4 요금(약 $46)이 빠집니다.
 - 요금은 리전과 시점에 따라 다르니 [AWS 요금 계산기](https://calculator.aws/)로 확인합니다.
 
 ## 라이선스

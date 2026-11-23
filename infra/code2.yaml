@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   code2 - a personal VS Code server in the browser. CloudFront (VPC origin) -> private EC2 (oauth2-proxy :80 with
-  Cognito sign-in -> code-server 127.0.0.1:8080). Own VPC, NAT and EC2 Instance Connect Endpoint, or an existing VPC.
+  Cognito sign-in -> code-server 127.0.0.1:8080). Own VPC, NAT and EC2 Instance Connect Endpoint.
   Deployed with infra/deploy.sh.
 
 Metadata:
@@ -15,8 +15,7 @@ Metadata:
       - Label: { default: Operations }
         Parameters: [BackupRetainCount, AlarmEmail, WaitForBoot, OriginSlot, SetupBucket]
       - Label: { default: Network (create-time) }
-        Parameters: [AvailabilityZone, CloudFrontPrefixListId, VpcCidr, PublicSubnetCidr, PrivateSubnetCidr, ExistingVpcId, ExistingSubnetId,
-                     ExistingEiceId, ExistingEiceSecurityGroupId]
+        Parameters: [AvailabilityZone, CloudFrontPrefixListId, VpcCidr, PublicSubnetCidr, PrivateSubnetCidr]
       - Label: { default: Edge }
         Parameters: [DomainName, HostedZoneId, CertificateArn, AuthDomainName, AuthCertificateArn, PriceClass]
 
@@ -25,11 +24,11 @@ Parameters:
     Type: String
     Default: ""
     Description: >-
-      AZ of the instance and /home (deploy.sh picks one offering InstanceType); required with ExistingSubnetId
+      AZ of the instance and /home (deploy.sh picks one offering InstanceType)
   VpcCidr:
     Type: String
     Default: 10.42.0.0/16
-    Description: CIDR of the new VPC (ignored with ExistingVpcId)
+    Description: CIDR of the new VPC
   CloudFrontPrefixListId:
     Type: String
     AllowedPattern: "^pl-[0-9a-f]+$"
@@ -38,32 +37,11 @@ Parameters:
   PublicSubnetCidr:
     Type: String
     Default: 10.42.0.0/24
-    Description: NAT gateway subnet (new VPC only)
+    Description: NAT gateway subnet
   PrivateSubnetCidr:
     Type: String
     Default: 10.42.1.0/24
-    Description: Instance and EC2 Instance Connect Endpoint subnet (new VPC only)
-  ExistingVpcId:
-    Type: String
-    Default: ""
-    AllowedPattern: "^$|^vpc-[0-9a-f]+$"
-    Description: >-
-      Optional existing VPC (with an internet gateway); ExistingSubnetId must be private with NAT egress
-  ExistingSubnetId:
-    Type: String
-    Default: ""
-    AllowedPattern: "^$|^subnet-[0-9a-f]+$"
-    Description: Private subnet of ExistingVpcId for the instance (only with ExistingVpcId)
-  ExistingEiceId:
-    Type: String
-    Default: ""
-    AllowedPattern: "^$|^eice-[0-9a-f]+$"
-    Description: Use this EC2 Instance Connect Endpoint (one per VPC) instead of creating one
-  ExistingEiceSecurityGroupId:
-    Type: String
-    Default: ""
-    AllowedPattern: "^$|^sg-[0-9a-f]+$"
-    Description: Security group of ExistingEiceId; the instance allows SSH from it
+    Description: Instance and EC2 Instance Connect Endpoint subnet
   DomainName:
     Type: String
     Default: ""
@@ -215,26 +193,11 @@ Rules:
         AssertDescription: AuthDomainName needs DomainName (its hosted zone and the parent name Cognito requires)
       - Assert: !Not [!Equals [!Ref AuthCertificateArn, ""]]
         AssertDescription: AuthDomainName needs AuthCertificateArn (an issued us-east-1 ACM certificate covering it)
-  ExistingNetwork:
-    RuleCondition: !Not [!Equals [!Ref ExistingVpcId, ""]]
-    Assertions:
-      - Assert: !Not [!Equals [!Ref ExistingSubnetId, ""]]
-        AssertDescription: ExistingVpcId needs ExistingSubnetId (a private subnet with NAT egress)
-      - Assert: !Not [!Equals [!Ref AvailabilityZone, ""]]
-        AssertDescription: ExistingVpcId needs AvailabilityZone (the AZ of ExistingSubnetId)
-  ExistingEndpoint:
-    RuleCondition: !Not [!Equals [!Ref ExistingEiceId, ""]]
-    Assertions:
-      - Assert: !Not [!Equals [!Ref ExistingEiceSecurityGroupId, ""]]
-        AssertDescription: ExistingEiceId needs ExistingEiceSecurityGroupId
 
 Conditions:
   HasDomain: !Not [!Equals [!Ref DomainName, ""]]
   HasAuthDomain: !Not [!Equals [!Ref AuthDomainName, ""]]
   HasAz: !Not [!Equals [!Ref AvailabilityZone, ""]]
-  CreateNetwork: !Equals [!Ref ExistingVpcId, ""]
-  CreateEice: !Equals [!Ref ExistingEiceId, ""]
-  UseExistingEice: !Not [!Equals [!Ref ExistingEiceId, ""]]
   MfaOn: !Equals [!Ref Mfa, "on"]
   HasSnapshot: !Not [!Equals [!Ref DataSnapshotId, ""]]
   HasBackup: !Not [!Equals [!Ref BackupRetainCount, 0]]
@@ -248,10 +211,9 @@ Conditions:
     - !Not [!Equals [!Select [0, !Split [tr, !Select [0, !Split [".", !Ref InstanceType]]]], ""]]
 
 Resources:
-  # --- network (skipped with ExistingVpcId) ---
+  # --- network ---
   Vpc:
     Type: AWS::EC2::VPC
-    Condition: CreateNetwork
     Properties:
       CidrBlock: !Ref VpcCidr
       EnableDnsSupport: true
@@ -261,18 +223,15 @@ Resources:
   # CloudFront VPC origins need an internet gateway on the VPC.
   InternetGateway:
     Type: AWS::EC2::InternetGateway
-    Condition: CreateNetwork
     Properties:
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-igw" }]
 
   GatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
-    Condition: CreateNetwork
     Properties: { VpcId: !Ref Vpc, InternetGatewayId: !Ref InternetGateway }
 
   PublicSubnet:
     Type: AWS::EC2::Subnet
-    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
       AvailabilityZone: !If [HasAz, !Ref AvailabilityZone, !Select [0, !GetAZs ""]]
@@ -282,14 +241,12 @@ Resources:
 
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
-    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-rtb-pub" }]
 
   PublicDefaultRoute:
     Type: AWS::EC2::Route
-    Condition: CreateNetwork
     DependsOn: GatewayAttachment
     Properties:
       RouteTableId: !Ref PublicRouteTable
@@ -298,12 +255,10 @@ Resources:
 
   PublicSubnetRoutes:
     Type: AWS::EC2::SubnetRouteTableAssociation
-    Condition: CreateNetwork
     Properties: { SubnetId: !Ref PublicSubnet, RouteTableId: !Ref PublicRouteTable }
 
   NatEip:
     Type: AWS::EC2::EIP
-    Condition: CreateNetwork
     DependsOn: GatewayAttachment
     Properties:
       Domain: vpc
@@ -311,7 +266,6 @@ Resources:
 
   NatGateway:
     Type: AWS::EC2::NatGateway
-    Condition: CreateNetwork
     Properties:
       SubnetId: !Ref PublicSubnet
       AllocationId: !GetAtt NatEip.AllocationId
@@ -319,7 +273,6 @@ Resources:
 
   PrivateSubnet:
     Type: AWS::EC2::Subnet
-    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
       AvailabilityZone: !If [HasAz, !Ref AvailabilityZone, !Select [0, !GetAZs ""]]
@@ -328,14 +281,12 @@ Resources:
 
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
-    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-rtb-pri" }]
 
   PrivateDefaultRoute:
     Type: AWS::EC2::Route
-    Condition: CreateNetwork
     Properties:
       RouteTableId: !Ref PrivateRouteTable
       DestinationCidrBlock: 0.0.0.0/0
@@ -343,26 +294,24 @@ Resources:
 
   PrivateSubnetRoutes:
     Type: AWS::EC2::SubnetRouteTableAssociation
-    Condition: CreateNetwork
     Properties: { SubnetId: !Ref PrivateSubnet, RouteTableId: !Ref PrivateRouteTable }
 
   # dnf repos and other S3 traffic skip the NAT gateway.
   S3Endpoint:
     Type: AWS::EC2::VPCEndpoint
-    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
       VpcEndpointType: Gateway
       ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
       RouteTableIds: [!Ref PrivateRouteTable]
 
-  # Stands in for "network ready" in both modes (DependsOn cannot name a resource whose condition is false).
+  # Stands in for "network ready" so DependsOn needs one name.
   NetworkReady:
     Type: AWS::CloudFormation::WaitConditionHandle
     Metadata:
-      Route: !If [CreateNetwork, !Ref PrivateDefaultRoute, ""]
-      Association: !If [CreateNetwork, !Ref PrivateSubnetRoutes, ""]
-      Gateway: !If [CreateNetwork, !Ref GatewayAttachment, ""]
+      Route: !Ref PrivateDefaultRoute
+      Association: !Ref PrivateSubnetRoutes
+      Gateway: !Ref GatewayAttachment
 
   # --- security groups ---
   # VPC origin traffic comes from CloudFront's origin-facing prefix list, not VPC IPs (a CIDR rule gives 504).
@@ -370,7 +319,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: code2 EC2 - oauth2-proxy :80 from CloudFront (VPC origin), SSH from the EICE
-      VpcId: !If [CreateNetwork, !Ref Vpc, !Ref ExistingVpcId]
+      VpcId: !Ref Vpc
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 80, ToPort: 80, SourcePrefixListId: !Ref CloudFrontPrefixListId,
             Description: CloudFront VPC origin }
@@ -380,10 +329,9 @@ Resources:
 
   EiceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
-    Condition: CreateEice
     Properties:
       GroupDescription: code2 EC2 Instance Connect Endpoint - SSH to the instance only
-      VpcId: !If [CreateNetwork, !Ref Vpc, !Ref ExistingVpcId]
+      VpcId: !Ref Vpc
       SecurityGroupEgress:
         - { IpProtocol: tcp, FromPort: 22, ToPort: 22, DestinationSecurityGroupId: !Ref InstanceSecurityGroup,
             Description: SSH to the code2 instance }
@@ -391,37 +339,18 @@ Resources:
 
   InstanceSshFromEice:
     Type: AWS::EC2::SecurityGroupIngress
-    Metadata:
-      cfn-lint: { config: { ignore_checks: [W1030] } }   # Existing* defaults are ""; Rules require real ids
     Properties:
       GroupId: !Ref InstanceSecurityGroup
       IpProtocol: tcp
       FromPort: 22
       ToPort: 22
-      SourceSecurityGroupId: !If [CreateEice, !Ref EiceSecurityGroup, !Ref ExistingEiceSecurityGroupId]
+      SourceSecurityGroupId: !Ref EiceSecurityGroup
       Description: EC2 Instance Connect Endpoint
-
-  # An existing EICE's group may allow egress to listed groups only.
-  EiceSshToInstance:
-    Type: AWS::EC2::SecurityGroupEgress
-    Metadata:
-      cfn-lint: { config: { ignore_checks: [W1030] } }   # Existing* defaults are ""; Rules require real ids
-    Condition: UseExistingEice
-    Properties:
-      GroupId: !Ref ExistingEiceSecurityGroupId
-      IpProtocol: tcp
-      FromPort: 22
-      ToPort: 22
-      DestinationSecurityGroupId: !Ref InstanceSecurityGroup
-      Description: !Sub "SSH to the ${AWS::StackName} code2 instance"
 
   InstanceConnectEndpoint:
     Type: AWS::EC2::InstanceConnectEndpoint
-    Metadata:
-      cfn-lint: { config: { ignore_checks: [W1030] } }   # Existing* defaults are ""; Rules require real ids
-    Condition: CreateEice
     Properties:
-      SubnetId: !If [CreateNetwork, !Ref PrivateSubnet, !Ref ExistingSubnetId]
+      SubnetId: !Ref PrivateSubnet
       SecurityGroupIds: [!Ref EiceSecurityGroup]
       PreserveClientIp: false
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-eice" }]
@@ -668,13 +597,11 @@ Resources:
 
   Instance:
     Type: AWS::EC2::Instance
-    Metadata:
-      cfn-lint: { config: { ignore_checks: [W1030] } }   # Existing* defaults are ""; Rules require real ids
     DependsOn: [NetworkReady, VolumeAttachPolicy, SetupConfig]   # setup.sh downloads from GitHub and attaches /home
     Properties:
       ImageId: !Ref ImageId
       InstanceType: !Ref InstanceType
-      SubnetId: !If [CreateNetwork, !Ref PrivateSubnet, !Ref ExistingSubnetId]
+      SubnetId: !Ref PrivateSubnet
       SecurityGroupIds: [!Ref InstanceSecurityGroup]
       IamInstanceProfile: !Ref InstanceProfile
       MetadataOptions:
@@ -922,13 +849,12 @@ Outputs:
   AvailabilityZone:
     Value: !GetAtt Instance.AvailabilityZone
   InstanceConnectEndpointId:
-    Value: !If [CreateEice, !Ref InstanceConnectEndpoint, !Ref ExistingEiceId]
+    Value: !Ref InstanceConnectEndpoint
   UserPoolId:
     Value: !Ref UserPool
   DistributionId:
     Value: !Ref Distribution
   NatPublicIp:
-    Condition: CreateNetwork
     Value: !Ref NatEip
   DataVolumeId:
     Value: !Ref DataVolume
