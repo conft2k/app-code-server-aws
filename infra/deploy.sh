@@ -253,6 +253,19 @@ legacy_template() {
   aws cloudformation get-template --stack-name "$STACK" --template-stage Original --query TemplateBody --output text
 }
 
+# Users sign in with their email (UsernameAttributes), which Cognito fixes when a user pool is created. A stack from
+# an earlier template (a separate sign-in name with an email alias) cannot be updated to it in place.
+check_email_signin() {
+  local pool attrs
+  pool=$(physical_id UserPool)
+  [ -n "$pool" ] && [ "$pool" != None ] || return 0
+  attrs=$(aws cognito-idp describe-user-pool --user-pool-id "$pool" --query 'UserPool.UsernameAttributes' --output text) \
+    || die "cannot read user pool $pool"
+  [[ "$attrs" == *email* ]] || die "$STACK was created by an older template whose user pool signs in with a user name, not \
+an email; Cognito cannot change that in place. Create a new stack with another CODE2_STACK (CODE2_RESTORE_SNAPSHOT=<a /home \
+snapshot> brings the workspace along), then destroy this one."
+}
+
 # ---------- change sets ----------
 # make_change_set <type> <template> <kind>: creates change set $cs from $PARAMS; fails when it has no changes.
 make_change_set() {
@@ -290,6 +303,7 @@ plan() {
   check_state
   case "$(stack_status)" in NONE|REVIEW_IN_PROGRESS|DELETE_COMPLETE) type=CREATE ;; *) type=UPDATE ;; esac
   template=$TEMPLATE kind=main
+  [ "$type" = CREATE ] || check_email_signin
 
   if [ "$type" = UPDATE ] && has_resource DataVolumeAttachment; then
     legacy_template > "$TMP/deployed.yaml"
