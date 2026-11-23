@@ -11,7 +11,7 @@ Metadata:
         Parameters: [AdminEmail, Mfa, PasswordMinLength, SessionHours]
       - Label: { default: Server }
         Parameters: [InstanceType, ImageId, RootVolumeSize, DataVolumeSize, DataSnapshotId, CodeServerVersion,
-                     OAuth2ProxyVersion, AutoUpdates, AiTools, IdleStopHours]
+                     OAuth2ProxyVersion, AutoUpdates, AiTools, Bedrock, BedrockRegion, CodexModel, IdleStopHours]
       - Label: { default: Operations }
         Parameters: [BackupRetainCount, AlarmEmail, WaitForBoot, OriginSlot, SetupBucket]
       - Label: { default: Network (create-time) }
@@ -94,6 +94,23 @@ Parameters:
     Description: >-
       on: install Claude Code, Codex and their code-server extensions for ec2-user in /home (at the end of the next
       setup run; off does not remove them)
+  Bedrock:
+    Type: String
+    Default: "on"
+    AllowedValues: ["on", "off"]
+    Description: >-
+      on: grant the instance role Bedrock invoke in this account; a new /home gets Claude Code and Codex configured
+      for it (with AiTools=on)
+  BedrockRegion:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[a-z]{2}(-[a-z]+)+-\\d+$"
+    Description: Region Claude Code and Codex call Bedrock in ("" = the stack region)
+  CodexModel:
+    Type: String
+    Default: global.openai.gpt-6.1-sol
+    AllowedPattern: "^[A-Za-z0-9.:_-]+$"
+    Description: Codex model on the Bedrock Runtime provider (written into a new /home only)
   IdleStopHours:
     Type: Number
     Default: 0
@@ -161,6 +178,8 @@ Conditions:
   HasBackup: !Not [!Equals [!Ref BackupRetainCount, 0]]
   HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
   WaitsForBoot: !Equals [!Ref WaitForBoot, "true"]
+  UseBedrock: !Equals [!Ref Bedrock, "on"]
+  BedrockRegionEmpty: !Equals [!Ref BedrockRegion, ""]
   OriginSlotA: !Equals [!Ref OriginSlot, a]
   OriginSlotB: !Equals [!Ref OriginSlot, b]
   # T families are burstable ("t4g" split on "t" starts with ""); Trainium (trn*) is not.
@@ -428,15 +447,17 @@ Resources:
           {"code_server_version":"${CodeServerVersion}","oauth2_proxy_version":"${OAuth2ProxyVersion}",
           "auto_updates":"${AutoUpdates}","ai_tools":"${AiTools}","idle_hours":"${IdleStopHours}",
           "session_hours":"${SessionHours}","vol":"${DataVolume}","user_pool":"${UserPool}",
-          "cognito_host":"${CognitoHost}","log_group":"${LogGroup}"}
+          "cognito_host":"${CognitoHost}","log_group":"${LogGroup}","bedrock":"${Bedrock}",
+          "bedrock_region":"${BedrockRegionResolved}","codex_model":"${CodexModel}"}
         # Not from UserPoolDomain (it would make the instance wait for the domain).
         - CognitoHost: !Sub "${AWS::StackName}-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com"
+          BedrockRegionResolved: !If [BedrockRegionEmpty, !Ref "AWS::Region", !Ref BedrockRegion]
 
   # --- compute ---
   InstanceRole:
     Type: AWS::IAM::Role
     Properties:
-      Description: code2 EC2 - SSM management, CloudWatch agent, attaches its /home volume, reads its own Cognito client secret and setup.sh
+      Description: code2 EC2 - SSM management, CloudWatch agent, attaches its /home volume, reads its own Cognito client secret and setup.sh; with Bedrock=on invokes Bedrock models
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -467,6 +488,40 @@ Resources:
                 Resource: !Sub "arn:${AWS::Partition}:s3:::${SetupBucket}/${AWS::StackName}/setup.sh"
                 Condition:   # only this account's bucket: the name is predictable
                   StringEquals: { "s3:ResourceAccount": !Ref "AWS::AccountId" }
+
+  # Claude Code and Codex on Bedrock with the instance role (no keys). Model access is an account admin step (README).
+  BedrockPolicy:
+    Type: AWS::IAM::RolePolicy
+    Condition: UseBedrock
+    Properties:
+      RoleName: !Ref InstanceRole
+      PolicyName: code2-bedrock
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InvokeModels   # cross-region profiles route to other regions, hence region *
+            Effect: Allow
+            Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+            Resource:
+              - !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/*"
+              - !Sub "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - !Sub "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:application-inference-profile/*"
+          - Sid: CodexResponsesProject
+            Effect: Allow
+            Action: bedrock:InvokeModel
+            Resource: !Sub
+              - "arn:${AWS::Partition}:bedrock:${Rgn}:${AWS::AccountId}:project/default"
+              - Rgn: !If [BedrockRegionEmpty, !Ref "AWS::Region", !Ref BedrockRegion]
+          - Sid: GetProfiles
+            Effect: Allow
+            Action: bedrock:GetInferenceProfile
+            Resource:
+              - !Sub "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - !Sub "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:application-inference-profile/*"
+          - Sid: ListProfiles   # no resource-level permissions
+            Effect: Allow
+            Action: bedrock:ListInferenceProfiles
+            Resource: "*"
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile

@@ -33,6 +33,10 @@ Settings (environment). Unset ones keep their current value on update; create-ti
   CODE2_PASSWORD_MIN_LENGTH    minimum password length, 8-99 (default 12)
   CODE2_AUTO_UPDATES           true|false daily security updates (default true)
   CODE2_AI_TOOLS               on|off install Claude Code and Codex for ec2-user (default on; off keeps installed ones)
+  CODE2_BEDROCK                on|off let the instance role call Bedrock, and set both tools up for it on a new /home
+                               (default on for a new stack, off for one that predates it)
+  CODE2_BEDROCK_REGION         region the tools call Bedrock in (default: the stack's)
+  CODE2_CODEX_MODEL            Codex model on Bedrock (default global.openai.gpt-6.1-sol)
   CODE2_IDLE_STOP_HOURS        stop after this many idle hours (default 0 = never)
   CODE2_BACKUP_COUNT           daily /home snapshots kept (default 7, 0 = off)
   CODE2_ALARM_EMAIL            CloudWatch alarm mails (default none)
@@ -156,6 +160,7 @@ keep() { PARAMS=$(jq -c --arg k "$1" '. + [{ParameterKey: $k, UsePreviousValue: 
 TUNABLES="InstanceType:CODE2_INSTANCE_TYPE DataVolumeSize:CODE2_DATA_SIZE RootVolumeSize:CODE2_ROOT_SIZE
   CodeServerVersion:CODE2_CODE_SERVER_VERSION OAuth2ProxyVersion:CODE2_OAUTH2_PROXY_VERSION
   SessionHours:CODE2_SESSION_HOURS Mfa:CODE2_MFA PasswordMinLength:CODE2_PASSWORD_MIN_LENGTH AutoUpdates:CODE2_AUTO_UPDATES AiTools:CODE2_AI_TOOLS IdleStopHours:CODE2_IDLE_STOP_HOURS
+  Bedrock:CODE2_BEDROCK BedrockRegion:CODE2_BEDROCK_REGION CodexModel:CODE2_CODEX_MODEL
   BackupRetainCount:CODE2_BACKUP_COUNT AlarmEmail:CODE2_ALARM_EMAIL PriceClass:CODE2_PRICE_CLASS
   AdminEmail:CODE2_ADMIN_EMAIL"
 # Fixed after create (network, the volume's source, the boot signal).
@@ -228,7 +233,7 @@ ask() {
   while :; do
     read -rp "$prompt " ans || die "stopped; nothing was changed"
     ans=${ans:-$def}
-    case "$var" in AWS_REGION|CODE2_MFA|CODE2_AI_TOOLS|CODE2_INSTANCE_TYPE) ans=$(printf %s "$ans" | tr '[:upper:]' '[:lower:]') ;; esac
+    case "$var" in AWS_REGION|CODE2_MFA|CODE2_AI_TOOLS|CODE2_BEDROCK|CODE2_INSTANCE_TYPE) ans=$(printf %s "$ans" | tr '[:upper:]' '[:lower:]') ;; esac
     if err=$("$check" "$ans"); then break; fi
     echo "  $err" >&2
   done
@@ -264,6 +269,9 @@ ask_create() {
   is_set CODE2_DATA_SIZE || ask CODE2_DATA_SIZE "/home size in GiB, can only grow [50]:" 50 chk_data
   is_set CODE2_IDLE_STOP_HOURS || ask CODE2_IDLE_STOP_HOURS "Stop after idle hours, 0 = never [0]:" 0 chk_idle
   is_set CODE2_AI_TOOLS || ask CODE2_AI_TOOLS "Install Claude Code and Codex (on/off) [on]:" on chk_onoff
+  if [ "${CODE2_AI_TOOLS:-on}" = on ]; then
+    is_set CODE2_BEDROCK || ask CODE2_BEDROCK "Use Amazon Bedrock in this account for Claude Code and Codex (on/off) [on]:" on chk_onoff
+  fi
   is_set CODE2_ALARM_EMAIL || ask CODE2_ALARM_EMAIL "Alarm email, empty = none []:" "" chk_email_or_empty
   # Every create setting in effect, asked or exported, so the line repeats this plan without questions.
   line="AWS_REGION=$(printf %q "$AWS_REGION") CODE2_STACK=$(printf %q "$STACK")"
@@ -282,6 +290,7 @@ ask_create() {
     echo "  /home               ${CODE2_DATA_SIZE:-50} GiB"
     echo "  stop                $idle"
     echo "  Claude Code, Codex  ${CODE2_AI_TOOLS:-on}"
+    [ "${CODE2_AI_TOOLS:-on}" != on ] || echo "  Amazon Bedrock      ${CODE2_BEDROCK:-on}"
     echo "  alarm email         $alarm"
     echo "Nothing is built yet: plan only makes a change set. infra/deploy.sh stack apply builds it (about 15-20 minutes)."
     printf 'To run the same again without questions:\n  export %s\n' "$line"
@@ -333,6 +342,8 @@ params_create() {
     k=${pair%%:*} v=${pair#*:}
     if is_set "$v"; then param "$k" "${!v}"; fi
   done
+  # No AI tools: nothing would use Bedrock, so the role does not get it unless asked.
+  [ "${CODE2_AI_TOOLS:-on}" = on ] || is_set CODE2_BEDROCK || param Bedrock off
   echo "create $STACK in $AWS_REGION ($caller): $type $arch in $az"
 }
 
@@ -345,6 +356,8 @@ params_update() {
     k=${pair%%:*} v=${pair#*:}
     if is_set "$v"; then param "$k" "${!v}"; elif has "$k"; then keep "$k"; fi
   done
+  # A stack that predates Bedrock gets it only when asked: its /home exists, so nothing would set the tools up.
+  has Bedrock || is_set CODE2_BEDROCK || param Bedrock off
   pl=$(prefix_list); param CloudFrontPrefixListId "$pl"   # always current; older stacks lack it
   param SetupBucket "$BUCKET"
   for k in $CREATE_ONLY; do
@@ -430,6 +443,9 @@ recreates_instance() {
 plan() {
   local type template kind cs ask_more=0
   if interactive; then ask_basics || ask_more=1; fi   # 1: the stack exists, nothing more to ask
+  if [ -n "${CODE2_BEDROCK_REGION:-}" ]; then
+    local r; r=$(chk_region "$CODE2_BEDROCK_REGION") || die "CODE2_BEDROCK_REGION: $r"
+  fi
   check_state
   case "$(stack_status)" in NONE|REVIEW_IN_PROGRESS|DELETE_COMPLETE) type=CREATE ;; *) type=UPDATE ;; esac
   template=$TEMPLATE kind=main

@@ -36,7 +36,7 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active 이면 �
 터미널에서 `stack plan`을 실행하면 `export` 없이도 필요한 설정을 차례로 물어봅니다. 기본값은 Enter로 받습니다.
 
 - 리전(기본: AWS CLI 프로필의 리전, 없으면 `ap-northeast-2`)과 스택 이름(기본 `code2`)을 먼저 묻습니다. 그 스택이 이미 있으면 "있다"고 알리고 더 묻지 않으며, 지정하지 않은 설정은 현재 값을 유지합니다.
-- 새 스택이면 이어서 로그인 메일(필수), MFA(`on`), 인스턴스 타입(`t4g.medium`), `/home` 크기(50 GiB), 유휴 자동 중지 시간(0 = 안 함), Claude Code·Codex 설치(`on`), 알림 메일(없음)을 묻습니다. 틀린 값은 이유를 알려 주고 다시 묻습니다.
+- 새 스택이면 이어서 로그인 메일(필수), MFA(`on`), 인스턴스 타입(`t4g.medium`), `/home` 크기(50 GiB), 유휴 자동 중지 시간(0 = 안 함), Claude Code·Codex 설치(`on`), 설치할 때 Amazon Bedrock 사용(`on`), 알림 메일(없음)을 묻습니다. 틀린 값은 이유를 알려 주고 다시 묻습니다.
 - 마지막에 같은 설정을 다시 쓸 `export` 줄을 보여 주고 `Continue with these settings? [Y/n]`로 확인합니다. `n`이면 AWS에 아무것도 만들지 않고 멈춥니다.
 - 이미 `export`한 값은 묻지 않습니다. 터미널이 아닐 때(스크립트, CI)나 `CODE2_YES=1`일 때는 아무것도 묻지 않고 환경 변수만 씁니다. 이때 새 스택에는 `CODE2_ADMIN_EMAIL`이 꼭 필요합니다.
 
@@ -47,6 +47,7 @@ export AWS_REGION=ap-northeast-2              # 원하는 리전
 export CODE2_ADMIN_EMAIL=you@example.com      # 로그인 메일 (임시 암호도 이 주소로 옵니다)
 # export CODE2_MFA=off                        # 선택: TOTP 없이 암호만 (기본 on)
 # export CODE2_AI_TOOLS=off                   # 선택: Claude Code, Codex 설치 안 함 (기본 on)
+# export CODE2_BEDROCK=off                    # 선택: 두 도구를 Bedrock에 연결하지 않음 (기본 on)
 # export CODE2_ALARM_EMAIL=you@example.com    # 선택: 장애 알림 메일 (아래 "모니터링")
 infra/deploy.sh stack plan </dev/null
 ```
@@ -64,7 +65,7 @@ infra/deploy.sh stack plan </dev/null
 ### 전체 구성
 
 <p align="center">
-  <img src="docs/architecture.png" alt="code2 구성도: 브라우저가 CloudFront와 VPC origin을 거쳐 private subnet EC2의 oauth2-proxy(Cognito 로그인)로 들어가 code-server에 연결되고, 부팅 때 S3 gateway endpoint로 setup.sh를, Parameter Store에서 설정을 받으며, 노트북은 EC2 Instance Connect Endpoint로 SSH하고 아웃바운드는 NAT gateway와 IGW로 나갑니다" width="100%">
+  <img src="docs/architecture.png" alt="code2 구성도: 브라우저가 CloudFront와 VPC origin을 거쳐 private subnet EC2의 oauth2-proxy(Cognito 로그인)로 들어가 code-server에 연결되고, 부팅 때 S3 gateway endpoint로 setup.sh를, Parameter Store에서 설정을 받으며, 노트북은 EC2 Instance Connect Endpoint로 SSH하고 아웃바운드(Bedrock=on일 때 Claude Code·Codex의 Amazon Bedrock 호출 포함)는 NAT gateway와 IGW로 나갑니다" width="100%">
 </p>
 
 실선은 데이터가 지나는 경로이고, 점선은 인증·설정 같은 제어 경로입니다. 번호는 그림 아래 표의 단계와 같습니다. 바깥에서 들어오는 길은 CloudFront와 EC2 Instance Connect Endpoint 두 곳뿐이고, 인스턴스에는 공인 IP가 없습니다. dnf 저장소와 `setup.sh` 같은 S3 트래픽은 S3 게이트웨이 엔드포인트로 NAT를 거치지 않고 나갑니다. 설정 스크립트를 두는 S3 버킷 `code2-setup-<계정>-<리전>`은 스택 밖에서 `deploy.sh`가 만듭니다. 그림에 없는 Data Lifecycle Manager(일일 스냅샷)도 함께 만들어집니다.
@@ -103,7 +104,7 @@ infra/deploy.sh stack plan </dev/null
 | 인바운드 | 인스턴스 보안 그룹: `:80`은 CloudFront origin-facing 관리형 prefix list(`com.amazonaws.global.cloudfront.origin-facing`)에서만, `:22`는 EICE 보안 그룹에서만 허용합니다. VPC origin 요청은 ENI의 VPC 주소가 아니라 이 대역에서 들어옵니다. 공인 IP는 없습니다 |
 | 로그인 | User Pool은 관리자만 계정을 만들 수 있고, 기본으로 **TOTP MFA가 필수**입니다(`CODE2_MFA=off`로 끌 수 있지만, sudo 셸이 걸린 로그인이라 권하지 않습니다). 암호는 기본 최소 12자(`CODE2_PASSWORD_MIN_LENGTH`, 8–99)이며 소문자와 숫자를 반드시 넣어야 합니다. 삭제 보호를 켜 두었고 스택을 지워도 남습니다(`Retain`) |
 | 비밀값 | Cognito 클라이언트 시크릿은 부팅할 때 인스턴스 역할(`cognito-idp:DescribeUserPoolClient`, 이 User Pool로 한정)로 직접 읽습니다. 쿠키 서명 키는 인스턴스에서 한 번 생성해 재부팅해도 유지합니다. 둘 다 `/etc/oauth2-proxy/secrets.env`(600)에만 있고, 템플릿·파라미터·저장소·로그에는 없습니다 |
-| 인스턴스 역할 | SSM 관리, CloudWatch 에이전트, 자기 Cognito 클라이언트 읽기, 자기 `/home` 볼륨 붙이기(이 볼륨 + 이 인스턴스 프로필로 한정) |
+| 인스턴스 역할 | SSM 관리, CloudWatch 에이전트, 자기 Cognito 클라이언트 읽기, 자기 `/home` 볼륨 붙이기(이 볼륨 + 이 인스턴스 프로필로 한정). `CODE2_BEDROCK=on`이면 이 계정의 Bedrock 모델 호출과 추론 프로파일 조회(아래 "Amazon Bedrock"). Marketplace 구독 권한은 주지 않습니다 |
 | 인스턴스 | IMDSv2 필수(hop limit 1), EBS 암호화, oauth2-proxy는 전용 시스템 사용자로 실행하고 `:80` 바인딩 권한만 가집니다(`ProtectSystem=strict`) |
 | 패치 | 기본으로 dnf-automatic이 매일 **보안 업데이트**를 적용합니다(최신 AL2023 저장소를 따라감, 자동 재부팅은 하지 않음). 커널 업데이트는 재부팅해야 적용됩니다 |
 | 소프트웨어 | code-server, oauth2-proxy 버전을 파라미터로 고정합니다. 다운로드는 재시도합니다. oauth2-proxy 파일은 릴리스의 sha256 파일로 무결성을 확인합니다(같은 출처라 위변조 방지는 아닙니다) |
@@ -128,7 +129,26 @@ infra/deploy.sh stack plan </dev/null
 
 `git`, `python3` (+ `pip`), `gcc`, `gcc-c++`, `make`, `tmux`, `jq`, AWS CLI v2, Node.js 22(`nodejs22`, `node`·`npm`). setup.sh는 `npm-22`를 직접 부르므로 다른 Node.js 버전을 기본으로 바꿔도 됩니다. **Docker는 설치되어 있지 않습니다.**
 
-AI 코딩 도구(Claude Code, Codex)는 `CODE2_AI_TOOLS`가 `on`(기본)일 때 `ec2-user`의 `/home`에 설치합니다(`off`면 설치하지 않습니다). `off`로 바꿔도 이미 설치한 도구는 지우지 않습니다. 켜면 setup.sh는 CLI가 없거나 실행되지 않을 때(`--version` 실패, 예: 설치가 덜 됐거나 인스턴스 타입을 바꿔 아키텍처가 달라졌을 때)만 그 CLI를 지우고 다시 설치합니다. 버전은 Claude Code는 설정한 업데이트 채널(기본 `latest`)의 최신 버전, Codex는 npm의 최신 버전입니다. 설정(`~/.claude`, `~/.codex`)은 그대로 둡니다. 확장은 없을 때만 설치합니다. 실행되는 도구는 건드리지 않으므로, 인스턴스를 교체해도 쓰던 버전과 설정이 남고 업데이트는 각 도구가 합니다. 이 설치는 서비스가 모두 뜨고 스택에 성공을 알린 뒤 맨 마지막에, 모두 합쳐 최대 15분 동안 합니다. 설치에 실패하거나 시간이 모자라면 경고만 남기고, 다음 setup 실행(재부팅, `reconfigure`) 때 다시 설치합니다. 로그인과 모델 설정(예: Bedrock)은 직접 합니다.
+AI 코딩 도구(Claude Code, Codex)는 `CODE2_AI_TOOLS`가 `on`(기본)일 때 `ec2-user`의 `/home`에 설치합니다(`off`면 설치하지 않습니다). `off`로 바꿔도 이미 설치한 도구는 지우지 않습니다. 켜면 setup.sh는 CLI가 없거나 실행되지 않을 때(`--version` 실패, 예: 설치가 덜 됐거나 인스턴스 타입을 바꿔 아키텍처가 달라졌을 때)만 그 CLI를 지우고 다시 설치합니다. 버전은 Claude Code는 설정한 업데이트 채널(기본 `latest`)의 최신 버전, Codex는 npm의 최신 버전입니다. 설정(`~/.claude`, `~/.codex`)은 그대로 둡니다. 확장은 없을 때만 설치합니다. 실행되는 도구는 건드리지 않으므로, 인스턴스를 교체해도 쓰던 버전과 설정이 남고 업데이트는 각 도구가 합니다. 이 설치는 서비스가 모두 뜨고 스택에 성공을 알린 뒤 맨 마지막에, 모두 합쳐 최대 15분 동안 합니다. 설치에 실패하거나 시간이 모자라면 경고만 남기고, 다음 setup 실행(재부팅, `reconfigure`) 때 다시 설치합니다. Bedrock 대신 Anthropic·OpenAI 계정으로 쓰려면 각 도구에서 직접 로그인합니다.
+
+### Amazon Bedrock
+
+`CODE2_BEDROCK`이 `on`(새 스택의 기본)이고 AI 도구가 켜져 있으면, Claude Code와 Codex(CLI와 code-server 확장)가 로그인 없이 이 계정의 Amazon Bedrock을 씁니다. 인증은 인스턴스 역할로 하므로 키를 만들거나 저장하지 않습니다.
+
+- 인스턴스 역할에 Bedrock 모델 호출(`bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream`)과 추론 프로파일 조회 권한을 줍니다. `off`로 바꾸면 이 권한을 지웁니다.
+- 새 `/home`을 만드는 첫 부팅 때, 서비스가 뜨기 전에 아래 파일을 만듭니다. 같은 경로에 이미 무엇이 있으면 그 파일은 만들지 않습니다.
+
+  | 파일 | 내용 |
+  |---|---|
+  | `~/.claude/settings.json` | `{"env": {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "<리전>"}}` |
+  | `~/.local/share/code-server/User/settings.json` | `{"claudeCode.disableLoginPrompt": true}` (Claude Code 확장의 로그인 화면을 띄우지 않음) |
+  | `~/.codex/config.toml` | `model_provider = "amazon-bedrock-runtime"`, `model = "<모델>"`, `web_search = "disabled"` |
+  | `~/.codex/.env` | `AWS_REGION=<리전>` (확장은 셸 환경 변수를 받지 않아 여기서 읽습니다) |
+
+- 리전은 `CODE2_BEDROCK_REGION`(기본: 스택 리전), Codex 모델은 `CODE2_CODEX_MODEL`(기본 `global.openai.gpt-6.1-sol`)로 정합니다. Claude Code는 리전에 맞는 추론 프로파일을 스스로 고릅니다.
+- 이미 있는 `/home`에는 파일을 만들지 않습니다(기존 스택에서 나중에 켤 때, 스냅샷에서 복원할 때). 위 표의 내용을 직접 넣고, 파일이 이미 있으면 그 키만 더합니다. 기존 스택은 `CODE2_BEDROCK=on`으로 적용해야 권한이 생깁니다.
+- 모델을 쓰려면 계정에서 해당 모델의 접근이 열려 있고 할당량이 있어야 합니다(일부 Anthropic 모델은 처음 한 번 사용 사례 양식을 제출합니다). 이 스택은 권한만 주고 모델을 활성화하지 않으므로, 열려 있지 않으면 도구가 `AccessDeniedException`이나 throttling 오류를 보입니다.
+- Bedrock에서는 Claude Code의 웹 검색 도구와 Codex의 호스팅 웹 검색을 쓸 수 없습니다.
 
 아키텍처가 다른 인스턴스 타입(예: `t4g` ↔ `t3`)으로 바꾸면 확장은 자동으로 다시 설치되지 않습니다. 새 인스턴스에서 `code-server --uninstall-extension anthropic.claude-code`, `code-server --uninstall-extension openai.chatgpt`로 지운 뒤 `reconfigure`를 실행하면, 그 아키텍처용으로 다시 설치합니다.
 
@@ -190,6 +210,9 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 | `CODE2_MFA` | `on` | 언제든 | `on`: 첫 로그인 때 TOTP를 등록하고 매번 코드를 입력합니다. `off`: 암호만. 나중에 `on`으로 바꾸면 사용자는 다음 로그인 때 TOTP를 등록합니다. Cognito의 OPTIONAL은 관리형 로그인이 TOTP 등록 화면을 띄우지 않아 넣지 않았습니다 |
 | `CODE2_AUTO_UPDATES` | `true` | 언제든 | 매일 보안 업데이트 |
 | `CODE2_AI_TOOLS` | `on` | 언제든 | `on`: Claude Code, Codex CLI와 code-server 확장을 `ec2-user`의 `/home`에 설치합니다(위 "기본 설치 도구"). 기존 스택은 이전 값을 유지합니다. 적용하면 `reconfigure`가 바로 설치하고, `off`로 바꿔도 설치된 도구는 지우지 않습니다 |
+| `CODE2_BEDROCK` | 새 스택 `on`, 기존 스택 `off` | 언제든 | `on`: 인스턴스 역할에 Bedrock 호출 권한을 주고, 새 `/home`이면 두 도구를 Bedrock에 연결합니다(위 "Amazon Bedrock"). AI 도구가 `off`인 새 스택은 묻지 않고 `off`입니다 |
+| `CODE2_BEDROCK_REGION` | 스택 리전 | 언제든 | 두 도구가 Bedrock을 호출할 리전. 설정 파일은 새 `/home`에만 쓰므로, 나중에 바꾸면 파일의 `AWS_REGION`도 직접 고칩니다 |
+| `CODE2_CODEX_MODEL` | `global.openai.gpt-6.1-sol` | 언제든 | Codex가 Bedrock에서 쓸 모델. 나중에 바꾸면 `~/.codex/config.toml`도 직접 고칩니다 |
 | `CODE2_IDLE_STOP_HOURS` | `0` (끔) | 언제든 | 유휴 상태가 이 시간만큼 이어지면 인스턴스 중지(아래 "유휴 중지") |
 | `CODE2_BACKUP_COUNT` | `7` | 언제든 | 보관할 일일 `/home` 스냅샷 수. `0`이면 백업 끔 |
 | `CODE2_ALARM_EMAIL` | 없음 | 언제든 | CloudWatch 알람 메일. 빈 값으로 지정하면 알람을 지웁니다 |

@@ -45,6 +45,15 @@ for k in sys.argv[2:]:
     if k in cfg:
         print(k + "=" + shlex.quote(str(cfg[k])))' "$cfg" $settings)"
 for v in $settings; do [ -n "${!v}" ] || fail "/$stack/setup has no $v"; done
+# Optional, outside the check above (older parameters lack them): Bedrock config for a new /home. A missing or
+# empty value keeps the default here.
+bedrock=off bedrock_region=$region codex_model=global.openai.gpt-6.1-sol
+eval "$(python3 -c '
+import json, shlex, sys
+cfg = json.loads(sys.argv[1])
+for k in sys.argv[2:]:
+    if cfg.get(k):
+        print(k + "=" + shlex.quote(str(cfg[k])))' "$cfg" bedrock bedrock_region codex_model)"
 vol_serial=${vol/-/}   # nvme serial = volume id without the dash
 
 dl() { curl -fsSL --retry 5 --retry-all-errors --connect-timeout 10 -o "$2" "$1"; }
@@ -97,8 +106,10 @@ if [ ! -e "$dev" ]; then
   done
   [ -e "$dev" ] || fail "data volume $vol never attached (last state: $state)"
 fi
+new_home=
 if ! blkid "$dev" >/dev/null 2>&1; then
   log "formatting the new /home volume"
+  new_home=1
   mkfs.xfs -L code2-home "$dev"
   mount "$dev" /mnt && cp -a /home/. /mnt/ && umount /mnt
 fi
@@ -106,6 +117,46 @@ grep -q code2-home /etc/fstab || echo 'LABEL=code2-home /home xfs defaults,nofai
 systemctl daemon-reload
 mountpoint -q /home || mount /home
 xfs_growfs /home >/dev/null   # picks up a larger DataVolumeSize
+
+# ---- Claude Code and Codex on Bedrock: config files, only on a /home formatted in this run ----
+# Nothing else can have written there yet (no service or user process has started), so there is no user setting to
+# override; any other /home is left alone (README: manual steps). Accepted residual risk: an SSH session during the
+# first boot. A path that exists already (copied from the old /home, or a dangling link) is skipped. Each file is
+# written to a temp file in its directory, synced and moved in without clobbering, so it is never seen half written.
+# Optional: a failure only warns, file by file (a subshell with no ERR trap; set -e does not apply under ||).
+# bedrock_init <home> [owner]: owner "" keeps the caller's (tests).
+bedrock_init() (
+  trap - ERR; set +e
+  h=$1 own=${2-ec2-user} rc=0
+  mine() { [ -z "$own" ] || chown "$own:" "$1"; }
+  # mkfile <path> <content>: the content is generated (and checked) by the caller before anything is written.
+  mkfile() { [ -n "$2" ] && put1 "$1" "$2" || { log "Bedrock: failed $1"; return 1; }; }
+  put1() {   # put1 <path> <content>: into <path> unless the path exists
+    local p=$1 d tmp; d=$(dirname "$p")
+    if [ -e "$p" ] || [ -L "$p" ]; then log "Bedrock: skipped (exists) $p"; return 0; fi
+    tmp=$(mktemp "$d/.code2-tmp.XXXXXX") || return 1
+    if ! { printf '%s\n' "$2" > "$tmp" && chmod 600 "$tmp" && mine "$tmp" && sync "$tmp"; }; then rm -f "$tmp"; return 1; fi
+    mv -n -T "$tmp" "$p" 2>/dev/null
+    if [ -e "$tmp" ]; then rm -f "$tmp"; log "Bedrock: skipped (exists) $p"; return 0; fi
+    sync "$d"; log "Bedrock: written $p"
+  }
+  for x in .claude .codex .local .local/share .local/share/code-server .local/share/code-server/User; do
+    [ -e "$h/$x" ] || [ -L "$h/$x" ] || { install -d -m 700 "$h/$x" && mine "$h/$x"; } || rc=1
+  done
+  c=$(jq -n --arg r "$bedrock_region" '{env: {CLAUDE_CODE_USE_BEDROCK: "1", AWS_REGION: $r}}') || c=
+  mkfile "$h/.claude/settings.json" "$c" || rc=1
+  c=$(jq -n '{"claudeCode.disableLoginPrompt": true}') || c=
+  mkfile "$h/.local/share/code-server/User/settings.json" "$c" || rc=1
+  mkfile "$h/.codex/.env" "AWS_REGION=$bedrock_region" || rc=1
+  c=$(python3 -c 'import json, sys
+print("model_provider = \"amazon-bedrock-runtime\"\nmodel = %s\nweb_search = \"disabled\"" % json.dumps(sys.argv[1]))' \
+    "$codex_model") || c=
+  mkfile "$h/.codex/config.toml" "$c" || rc=1
+  exit $rc
+)
+if [ -n "$new_home" ] && [ "$ai_tools" = on ] && [ "$bedrock" = on ]; then
+  bedrock_init /home/ec2-user || log "warning: Bedrock config for Claude Code and Codex failed (README: manual steps)"
+fi
 
 # ---- code-server ----
 cs=/usr/local/lib/code-server-${code_server_version}
